@@ -109,6 +109,26 @@ static inline double lb_rand(uint32_t *rng) {
     return ((double)((*rng >> 16) & 0x7FFF) / 32768.0) * 2.0 - 1.0;
 }
 
+/* int16 quantizer for the loop buffers: round-to-nearest + TPDF dither.
+ * The overdub mix path re-quantizes the WHOLE accumulated loop on every lap, so a
+ * plain (int16_t) cast — which truncates toward zero — leaves a dead zone around 0
+ * (both +0.9 and -0.9 LSB land on 0) and signal-correlated distortion that compounds
+ * layer after layer. Rounding removes the dead zone and the bias; TPDF dither
+ * decorrelates what is left, so the residue is noise instead of distortion.
+ * Exact silence is passed through undithered: a looper re-quantizes the same samples
+ * many times, so dithering true zeros would slowly grow a noise floor in the quiet
+ * parts of a loop. (Deliberately NOT noise-shaped — see the note in
+ * research/dafx-loopex-review.md: shaping assumes ONE final quantization, and this
+ * buffer is re-quantized every lap, so shaped HF error would accumulate.) */
+static inline int16_t lb_quant16(double x, uint32_t *rng) {
+    if (x == 0.0) return 0;
+    double s = x * 32767.0;
+    double d = (lb_rand(rng) + lb_rand(rng)) * 0.5;   /* TPDF, +/-1 LSB */
+    double q = floor(s + d + 0.5);
+    if (q > 32767.0) q = 32767.0; else if (q < -32767.0) q = -32767.0;
+    return (int16_t)q;
+}
+
 /* ---- Biquad ---- */
 typedef struct { double b0, b1, b2, a1, a2, z1L, z2L, z1R, z2R; } Biquad;
 static void bq_reset(Biquad *f) { memset(f, 0, sizeof(Biquad)); }
@@ -214,6 +234,8 @@ typedef struct {
     int glN, glOrder[16], glRev[16], glLastSlice; double glPrevAbs; float glKnobCache;  /* Seed slice-reorder */
     double playPhase, stabLpStateL, stabLpStateR;
     uint32_t rng;
+    uint32_t ditRng;                      /* dither RNG for the int16 buffer writes — kept separate from
+                                           * rng so Seed/Scatter/Jump sequences stay bit-identical */
     int djMode;   /* -1 = LP active, +1 = HP active, 0 = bypass (transparent at centre) */
     double playEnv; /* click-free start/stop envelope (ramps 0<->1 on play/pause) */
     double scatXfadePhase; int scatXfade; /* scatter jump crossfade (declick): old read head + countdown */
@@ -1153,7 +1175,16 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
     double gate=((playing||scrubbing) && !v->muted)?1.0:0.0;
     double ek=(gate>v->playEnv)?(double)v->ampAtkK:(double)v->ampRelK;
     v->playEnv += (gate-v->playEnv)*ek;
-    double _bf=1.0; const double _FD=128.0;                /* loop-boundary fade (click-free wrap), from linear phase */
+    /* Loop-boundary fade (click-free wrap), measured on the linear phase. The window is in
+     * BUFFER samples, so at rate R the head crosses it in 128/R OUTPUT samples — at Speed +2 oct
+     * (4x) that is 0.7 ms, and under tape wind (up to 32x, and pitch stacks on top) it collapses
+     * to a hard edge that clicks on every wrap. Widen it with the read rate so the fade keeps a
+     * constant ~2.9 ms of output time. At rate <= 1 this is exactly the old 128, so normal and
+     * slowed playback are bit-identical; only the fast end changes. Clamped so a short loop can
+     * never be swallowed by its own fades. */
+    double _r0=fabs(baseRate); double _FD=128.0*(_r0>1.0?_r0:1.0);
+    { double _cap=(double)effLen*0.25; if(_FD>_cap)_FD=_cap; }
+    double _bf=1.0;
     if(boundRel<_FD)_bf=boundRel/_FD; else if(boundRel>(double)effLen-_FD)_bf=((double)effLen-boundRel)/_FD;
     if(_bf<0.0)_bf=0.0;
     /* Head 0 fades with its own mode; heads 1-3 add their own reads. */
@@ -1171,7 +1202,9 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
             P->xf--; }
         double hrel=P->phase-(double)effStart;
         while(hrel<0)hrel+=(double)effLen; while(hrel>=(double)effLen)hrel-=(double)effLen;
-        double hbf=1.0; if(hrel<_FD)hbf=hrel/_FD; else if(hrel>(double)effLen-_FD)hbf=((double)effLen-hrel)/_FD;
+        double _rk=fabs(baseRate*P->mult); double _FDk=128.0*(_rk>1.0?_rk:1.0);   /* same rate-scaled fade, per head */
+        { double _cap=(double)effLen*0.25; if(_FDk>_cap)_FDk=_cap; }
+        double hbf=1.0; if(hrel<_FDk)hbf=hrel/_FDk; else if(hrel>(double)effLen-_FDk)hbf=((double)effLen-hrel)/_FDk;
         if(hbf<0.0)hbf=0.0;
         double hv=(double)v->hVol[k], hp=(double)v->hPan[k];   /* per-head Vol + balance (center = unity, no level change) */
         double hpl=(hp<=0.0)?1.0:(1.0-hp), hpr=(hp>=0.0)?1.0:(1.0+hp);
@@ -1241,8 +1274,8 @@ static void voice_disintegrate_pass(Voice *v) {
         voice_wowflutter_stereo(v,&xL,&xR,(double)v->wowFlutter*0.2);
         double stabK=0.15;v->stabLpStateL+=stabK*(xL-v->stabLpStateL);xL=v->stabLpStateL;
         v->stabLpStateR+=stabK*(xR-v->stabLpStateR);xR=v->stabLpStateR;xL*=0.98;xR*=0.98;
-        v->bufferL[i]=(int16_t)lb_clampd(xL*32767.0,-32767.0,32767.0);
-        v->bufferR[i]=(int16_t)lb_clampd(xR*32767.0,-32767.0,32767.0);}
+        v->bufferL[i]=lb_quant16(lb_clampd(xL,-1.0,1.0),&v->ditRng);   /* dithered: a Disint pass re-quantizes the whole buffer */
+        v->bufferR[i]=lb_quant16(lb_clampd(xR,-1.0,1.0),&v->ditRng);}
 }
 
 /* ---- MIDI-keyboard polyphony (plays a loop's buffer pitched, through its FX) ---- */
@@ -1314,7 +1347,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         v->pitch=0.0f;v->filter=0.5f;v->pan=0.0f;v->volume=0.8f;
         v->saturation=0.0f;v->wowFlutter=0.0f;v->send=0.0f;v->glitch=0.0f;
         v->tiltEQ=0.0f;v->decay=1.0f;v->eqBass=0.0f;v->eqPresFreq=0.5f;v->eqPresAmt=0.0f;v->eqTreble=0.0f;
-        v->flutNextMax=0.5;v->rng=12345+i*7919;v->glLastSlice=-1;
+        v->flutNextMax=0.5;v->rng=12345+i*7919;v->ditRng=0x9E3779B9u+(uint32_t)i*2654435761u;v->glLastSlice=-1;
         v->djReso=0.0f;v->djWet=0.0f;v->djWetTgt=0.0f;v->ampAtk=0.0f;v->ampRel=0.0f;v->ampAtkCache=-1.0f;v->ampRelCache=-1.0f;v->lfModeCache=-99;v->lfG=0.5f;
         v->comp=0.0f;v->clock=0.0f;v->psCache=-99.0f;v->psActive=0;v->psMix=0.0;v->psNudge=0;
         v->ps=ps_create(44100.0f,128,(i*512)/NUM_VOICES);   /* staggered so the 16 STFTs do not land in one callback */
@@ -1997,12 +2030,12 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
                 switch(odMode){
                 case OD_REPLACE:v->bufferL[v->playHead]=inSL;v->bufferR[v->playHead]=inSR;break;
                 case OD_MULTIPLY:{double oL=(double)v->bufferL[v->playHead]/32768.0,oR=(double)v->bufferR[v->playHead]/32768.0;
-                    double dg=0.5+(double)v->decay*0.5;
-                    v->bufferL[v->playHead]=(int16_t)lb_clampd((oL*dg+inL)*32767.0,-32767.0,32767.0);
-                    v->bufferR[v->playHead]=(int16_t)lb_clampd((oR*dg+inR)*32767.0,-32767.0,32767.0);break;}
+                    double dg=0.5+(double)v->decay*0.5;   /* dithered: this mix re-quantizes the whole loop every lap */
+                    v->bufferL[v->playHead]=lb_quant16(lb_clampd(oL*dg+inL,-1.0,1.0),&v->ditRng);
+                    v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*dg+inR,-1.0,1.0),&v->ditRng);break;}
                 case OD_DISINTEGRATION:{double oL=(double)v->bufferL[v->playHead]/32768.0,oR=(double)v->bufferR[v->playHead]/32768.0;
-                    v->bufferL[v->playHead]=(int16_t)lb_clampd((oL*0.85+inL)*32767.0,-32767.0,32767.0);
-                    v->bufferR[v->playHead]=(int16_t)lb_clampd((oR*0.85+inR)*32767.0,-32767.0,32767.0);break;}}}}
+                    v->bufferL[v->playHead]=lb_quant16(lb_clampd(oL*0.85+inL,-1.0,1.0),&v->ditRng);
+                    v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*0.85+inR,-1.0,1.0),&v->ditRng);break;}}}}
 
         double mixL=0.0,mixR=0.0,sAL=0.0,sAR=0.0,sBL=0.0,sBR=0.0;
         for(int vi=0;vi<NUM_VOICES;vi++){double vL,vR,aL,aR,bL,bR;

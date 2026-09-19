@@ -76,11 +76,9 @@ const mutes = new Array(NV).fill(false);
 let midiMode = 0;   /* external-MIDI mode mirror: 0 Off · 1 Keys (DSP poly) · 2 Ctrl (LCXL here) */
 const mutePressed = new Array(NV).fill(false);   /* pad press was a Mute+tap — its release must not clear */
 let tickCount = 0;
-const lastTapMs = new Array(NV).fill(0);
 const pressMs   = new Array(NV).fill(0);
 const speedIdx  = new Array(NV).fill(2);   /* 0=0.5x 1=2x 2=1x ; start at 1x */
-const DOUBLE_TAP_MS = 350;
-const CLEAR_HOLD_MS = 1000;
+const CLEAR_HOLD_MS = 1000;   /* (overdub is Undo+tap now — no double-tap window to keep) */
 let statusMsg = '', statusMsgUntil = 0;
 function setMsg(m) { statusMsg = m; statusMsgUntil = tickCount + 40; }
 function now() { return (typeof Date !== 'undefined' && Date.now) ? Date.now() : tickCount * 23; }
@@ -176,7 +174,7 @@ const MENU_DEFS = [
       { k:'armThresh', lo:0, hi:1, lbl:'ArmTh' },     { k:'overdubMode', opts:['Replace','Multiply','Disint'], lbl:'ODub' },
       { k:'loopFiltMode', opts:['Clean','SEM','MS-20','Steiner','Ladder4','Ladder2','Ladder1','Prophet','Oberheim','Diode','K35','Vintage'], lbl:'LpFlt' },
       { k:'rootNote', lo:24, hi:96, lbl:'Root', int:true }, { k:'inputMonitor', lo:0, hi:1, lbl:'InMon' },
-      { k:'inSource', opts:['Line','Master','S1','S2','S3','S4','M1','M2','M3','M4'], lbl:'InSrc' },
+      { k:'inSource', opts:['Line','Master','S1','S2','S3','S4','M1','M2','M3','M4','Self'], lbl:'InSrc' },
       { k:'midiIn', opts:['Off','Keys','Ctrl'], lbl:'MIDI' },  { k:'midiOut', opts:['Off','On'], lbl:'MidiO' },
       { k:'masterVol', lo:0, hi:1.5, lbl:'Out' },     { k:'masterLoCut', lo:20, hi:1000, lbl:'LoCut', int:true, step:5 },
       { k:'masterHiCut', lo:1000, hi:20000, lbl:'HiCut', int:true, step:100 }, { k:'punchWidth', lo:0, hi:1, lbl:'PWide' },
@@ -292,6 +290,19 @@ let blinkOn = false, resumeRepaint = 0;
 let view = 'main', viewUntil = 0;          /* 'main' | 'knobs' | 'wave' */
 const VIEW_MS = 10000;                     /* 10s of real time before falling back */
 let sampleHeld = false, jogHead = -1;      /* Shift+Sample+jog = arm threshold; P4 touch = head to move */
+/* Jog acceleration. The encoder reports one detent at a time (decodeDelta is +/-1
+ * however fast you spin), so speed has to be inferred from how fast the detents
+ * ARRIVE: short gaps = fast spin = bigger scrub step. A gap of ~120 ms or more is
+ * a deliberate, slow turn and keeps the 1x step; a fast spin ramps up to 16x. */
+let jogLastT = 0, jogAccel = 1;
+function jogVelocity() {
+    const t = now(), dt = t - jogLastT; jogLastT = t;
+    if (dt >= 200) { jogAccel = 1; return 1; }        /* new gesture — always start slow */
+    let target = (dt > 0) ? (120 / dt) : 16;
+    if (target > 16) target = 16; else if (target < 1) target = 1;
+    jogAccel += (target - jogAccel) * 0.5;            /* smooth: one stray fast tick can't spike it */
+    return jogAccel;
+}
 let waveStr = '', headsStr = '';
 let waveStart = 0, waveEnd = 1;   /* current loop trim, for the waveform markers */
 let driftMixOn = false;           /* Drift Mix > 0.1 -> the Sample LED glows */
@@ -319,7 +330,7 @@ function enumSteps(k, delta) {
 }
 let needReload = true;
 let lastKnob = -1, lastKnobLbl = '', lastKnobVal = '';
-let cpu = '0', loopLen = '0', inPeak = '0';
+let cpu = '0', loopLen = '0', inPeak = '0', takeTime = '0';
 
 const PAGE0 = [   /* Loop page 1 (Up arrow) — knob 8 = Send A */
     { k: 'v_pitch', lo: -2, hi: 2, lbl: 'Spd', spd: true, step: 0.1 / 12 }, { k: 'v_filter', lo: 0, hi: 1, lbl: 'Fil', step: 0.002 },
@@ -1157,7 +1168,10 @@ function drawWaveView() {
         const parts = headsStr.split(';');
         for (let k = 0; k < 4; k++) { const kv = (parts[k] || '0,0').split(','); hm += MODE_CH[(parseInt(kv[0]) || 0) & 3]; }
     }
-    drawHeader(ctx, 'Track ' + (sel + 1) + ' ' + STATE_NAMES[voiceState[sel]] + ' ' + loopLen + 's', hm ? 'Heads ' + hm : null, false);
+    {   /* show the running take while recording, otherwise the committed loop length */
+        const st = voiceState[sel], t = (st === 1 || st === 4) ? takeTime : loopLen;
+        drawHeader(ctx, 'Track ' + (sel + 1) + ' ' + STATE_NAMES[st] + ' ' + t + 's', hm ? 'Heads ' + hm : null, false);
+    }
     drawBankBar(ctx, page(), PAGES.length);
     const midY = 34, halfH = 22;
     if (waveStr && waveStr.length >= 256) {
@@ -1212,7 +1226,15 @@ function drawUI() {
         if (i === sel) fill_rect(x, 19, 6, 1, 1);   /* selected underline */
     }
     draw_line(0, 23, SCREEN_W, 23, 1);
-    tzPrint(ctx, 0, 27, ('LOOP ' + loopLen + 'S').toUpperCase(), 1);
+    {   /* line 1 = the take being recorded, or the committed loop length.
+           line 2 = cumulative overdub time, so DUB doesn't hide LOOP. */
+        const st = voiceState[sel];
+        if (st === 1) tzPrint(ctx, 0, 27, ('REC ' + takeTime + 'S').toUpperCase(), 1);
+        else {
+            tzPrint(ctx, 0, 27, ('LOOP ' + loopLen + 'S').toUpperCase(), 1);
+            if (st === 4) tzPrint(ctx, 0, 40, ('DUB ' + takeTime + 'S').toUpperCase(), 1);
+        }
+    }
     const inTxt = 'IN ' + inPeak;
     tzPrint(ctx, SCREEN_W - tzWidth(inTxt) - 1, 27, inTxt, 1);
     /* one line of context: what the modifiers do right now, or a status message */
@@ -1294,7 +1316,13 @@ globalThis.tick = function () {
         if (on !== driftMixOn) { driftMixOn = on; paintNav(); } }
     if (tickCount % 6 === 0) pollStates();
     if (tickCount % 15 === 3) { const c = gp('cpu'); if (c) cpu = c; }
-    if (tickCount % 12 === 7) { const l = gp('v_loopLen'); if (l) loopLen = l; const p = gp('inputPeak'); if (p) inPeak = p; }
+    {   /* loopLen only moves when a take is committed; takeTime is a live counter -> poll it fast */
+        const st = voiceState[sel], live = (st === 1 || st === 4);
+        if (tickCount % 12 === 7) { const l = gp('v_loopLen'); if (l) loopLen = l; }
+        if (live) { if (tickCount % 3 === 0) { const t = gp('v_takeTime'); if (t) takeTime = t; } }
+        else takeTime = '0.00';
+    }
+    if (tickCount % 12 === 7) { const p = gp('inputPeak'); if (p) inPeak = p; }
     drainLEDs();
     drawUI();
 };
@@ -1345,7 +1373,7 @@ globalThis.onMidiMessageInternal = function (data) {
                 sp('headpos', jogHead + ':' + dv);
                 setMsg('H' + (jogHead + 1) + (dv > 0 ? ' >>' : ' <<')); showView('wave'); return;
             }
-            sp('scrub', String(dv));                                         /* scrub the tape */
+            sp('scrub', (dv * jogVelocity()).toFixed(2));                    /* scrub the tape, faster the faster you spin */
             setMsg('scrub ' + (dv > 0 ? '>>' : '<<')); showView('wave'); return;
         }
         if (d1 === MoveDown  && d2 > 0) { if (menu >= 0 && MENU_PAGED[menu]) { menuPage = Math.min(menuPages() - 1, menuPage + 1); menuReload = true; dirty = true; return; } setPage(loopPage + 1); showView('knobs'); return; }
@@ -1449,13 +1477,20 @@ globalThis.onMidiMessageInternal = function (data) {
             selectTrack(i);
             pressMs[i] = now();
             if (shiftHeld) { mutePressed[i] = true; cycleSpeed(i); return; }   /* Shift+tap = cycle speed (not a clear-hold) */
-            const t = now(), dbl = (t - lastTapMs[i]) < DOUBLE_TAP_MS;
-            lastTapMs[i] = t;
-            if (dbl && voiceState[i] >= 2) {            /* double-tap a loop with content = overdub */
+            if (undoHeld && voiceState[i] >= 2) {        /* Undo+tap = overdub (toggles back out) */
+                /* This replaces the old double-tap. Double-tap could not work without first
+                 * doing a plain tap — which PAUSED the loop, cutting the audio AND freezing the
+                 * playhead, so the loop came back out of phase with the others by however long
+                 * the two taps were apart. A modifier has no such first step: pause stays
+                 * instant and overdub is instant. */
+                mutePressed[i] = true;                  /* this release is a modifier combo, not a clear-hold */
+                undoUsed = true;                        /* ...and not a plain Undo on release */
                 spCmd('odub:' + i);
                 voiceState[i] = (voiceState[i] === 4) ? 2 : 4;
                 setMsg('T' + (i + 1) + (voiceState[i] === 4 ? ' overdub' : ' play'));
-            } else {
+                enqLED(LEFT_NOTES[i], padColor(i)); dirty = true; return;
+            }
+            {
                 spCmd('tap:' + i);
                 voiceState[i] = nextTap(voiceState[i]);
             }
@@ -1534,7 +1569,7 @@ globalThis.onMidiMessageInternal = function (data) {
             if (mutePressed[i]) { mutePressed[i] = false; return; }   /* release of a Mute+tap — never clears */
             if (pressMs[i] > 0 && now() - pressMs[i] >= CLEAR_HOLD_MS) {   /* long-press = clear loop */
                 spCmd('clear:' + i);
-                voiceState[i] = 0; lastTapMs[i] = 0; mutes[i] = false; lastCleared = i;
+                voiceState[i] = 0; mutes[i] = false; lastCleared = i;
                 enqLED(LEFT_NOTES[i], padColor(i));
                 setMsg('T' + (i + 1) + ' cleared (Undo)');
             }

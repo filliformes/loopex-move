@@ -146,7 +146,7 @@ const CHANCE_NAMES = ['Always','10%','20%','30%','40%','50%','60%','70%','80%','
 const PFX_NAMES = ['Off','Drive','Sweeten','Fuzz','Howl','Fold','Swell','Doubler','Vibrato','Phaser','Tremolo','Pitch','Shift',
                    'Cascade','Reels','Collage','Reverse','Space','Bloom','Filter','Squash','Cassette','Broken','Interference','Halo','Plate','Quartz','Prism','Veil'];
 const PREAMP_NAMES = ['Tapeless','Clean','Cass1','Cass2','VHS1','VHS2','Reel15','Reel7','Reel3','4trk','Porta','Dub','Warp'];
-const MEQ_NAMES = ['Off','Studer','Neve','SSL','API','SP12','MPC','Emu','Ampex','Juno','Console'];
+const MEQ_NAMES = ['Off','962','Console','Neve','SSL','API','Studer','Ampex','Juno','SP12','MPC','Emu'];
 const MENU_DEFS = [
     [ /* Track 1 — Input FX */
       { k:'inputMonitor', lo:0, hi:1, lbl:'Mon' },    { k:'preamp', opts:PREAMP_NAMES, lbl:'Style' },

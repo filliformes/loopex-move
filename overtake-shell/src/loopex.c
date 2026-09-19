@@ -141,6 +141,9 @@ static inline int16_t lb_quant16(double x, uint32_t *rng) {
  * or from an asymmetric stage inside the loop - and the offset then biases the saturator it
  * passes through, eating headroom asymmetrically and dulling the tail long before it is
  * audible as "DC". Nothing in this module high-passed any feedback path before this. */
+/* Sampler grit, 0..1, published by the selected master Character (MEQ_DEF column 10).
+ * Written once per masterEQ change, read by the loop reader - same thread, no sync needed. */
+static float g_interpGrit = 0.0f;
 #define LB_DCR 0.99715
 static inline double lb_dcblock(double x, float *x1, float *y1) {
     double y = x - (double)*x1 + LB_DCR * (double)*y1;
@@ -170,18 +173,24 @@ static inline void lb_loop_read(const int16_t *bl, const int16_t *br, int L, dou
     int im1=i0-1; if(im1<0)im1+=L;
     int i1=i0+1; if(i1>=L)i1-=L;
     int i2=i1+1; if(i2>=L)i2-=L;
-    *l=lb_hermite((double)bl[im1],(double)bl[i0],(double)bl[i1],(double)bl[i2],f)/32768.0;
-    *r=lb_hermite((double)br[im1],(double)br[i0],(double)br[i1],(double)br[i2],f)/32768.0;
+    double hl=lb_hermite((double)bl[im1],(double)bl[i0],(double)bl[i1],(double)bl[i2],f);
+    double hr=lb_hermite((double)br[im1],(double)br[i0],(double)br[i1],(double)br[i2],f);
+    if(g_interpGrit>0.001f){                    /* crossfade toward a vintage sampler's linear read */
+        double g=(double)g_interpGrit;
+        double ll=(double)bl[i0]+((double)bl[i1]-(double)bl[i0])*f;
+        double lr=(double)br[i0]+((double)br[i1]-(double)br[i0])*f;
+        hl+=(ll-hl)*g; hr+=(lr-hr)*g; }
+    *l=hl/32768.0; *r=hr/32768.0;
 }
 
 /* ---- Biquad ---- */
 typedef struct { double b0, b1, b2, a1, a2, z1L, z2L, z1R, z2R; } Biquad;
 /* Reset = make the filter INERT, i.e. a unity pass-through. Zeroing the whole struct also
  * zeroes b0, and this is transposed direct form II, so an all-zero biquad does not bypass -
- * it outputs SILENCE. master_character ticks its three bands unconditionally, so the first
- * Character voicing with a genuinely flat band would reset eqMidPk and mute the whole master
- * bus. Every shipped voicing happens to have a non-zero mid, and Off returns early, which is
- * the only reason this had never fired. The input EQ has the same shape. */
+ * it outputs SILENCE. That was a live landmine: master_character ticks its three bands
+ * unconditionally, so the first Character voicing with a genuinely flat band (the 962 desk,
+ * midDb = 0) reset eqMidPk and muted the entire master bus. Every existing voicing happened
+ * to have a non-zero mid, and Off returns early, which is why it had never fired. */
 static void bq_reset(Biquad *f) { memset(f, 0, sizeof(Biquad)); f->b0 = 1.0; }
 static void bq_set_lp(Biquad *f, double freq, double Q) {
     double w0=TWOPI*freq/SR,cosW=cos(w0),alpha=sin(w0)/(2.0*Q),a0=1.0+alpha;
@@ -398,6 +407,10 @@ typedef struct {
 } FxSeq;
 
 /* One active punch slot: its own capture ring + running state (up to 5 in series). */
+/* Shared grain pool per punch slot, used by Haze / Smear / Mosaic / Strum.
+ * PM_STRETCH does NOT use it: it drives slots 0-3 with its own respawn and
+ * weighted-average logic (the wander-wash), and must stay exactly 4 deep. */
+#define PUNCH_GRAINS 16
 typedef struct {
     int idx;                                   /* effect 0..15, or -1 = empty */
     double env; int releasing;                 /* click-free fade-in / fade-out on press/release */
@@ -409,7 +422,8 @@ typedef struct {
     double elCur, sliceStartT, pressSm;         /* slice length in use (changes only at a wrap), pending start, smoothed pad pressure */
     Biquad toneFilt;
     /* granular pool (Haze / Mosaic / Smear / Strum / Stretch share it) */
-    double gPos[4],gAge[4],gDur[4],gRate[4],gGl[4],gGr[4]; int gAct[4];
+    double gPos[PUNCH_GRAINS],gAge[PUNCH_GRAINS],gDur[PUNCH_GRAINS],gRate[PUNCH_GRAINS];
+    double gGl[PUNCH_GRAINS],gGr[PUNCH_GRAINS]; int gAct[PUNCH_GRAINS];
     double gSched, stGrid; uint32_t gRng; int gIdx, gPrime;   /* gPrime: first grain fires now + a mid-window one */
     /* glide: per-repeat rate ramp; chop: onset slice + pattern */
     double glRate; int glCycle; int chopStep, chopIdx;
@@ -691,7 +705,9 @@ static void voice_antiimage(Voice *v, int k, double rate, double *outL, double *
     if(fabsf(q-v->aiCache[k])>0.002f){                  /* recompute coeffs only on a real rate change */
         double cut=r*(SR*0.5)*0.92; if(cut<200.0)cut=200.0;   /* 0.92 = guard band under rate*Nyquist */
         bq_set_lp(&v->aiLp[k],cut,0.707); v->aiCache[k]=q; }
-    *outL=bq_L(&v->aiLp[k],*outL); *outR=bq_R(&v->aiLp[k],*outR);
+    double fL=bq_L(&v->aiLp[k],*outL), fR=bq_R(&v->aiLp[k],*outR);
+    double g=(double)g_interpGrit;              /* grit 1.0 -> filter fully out, images intact */
+    *outL+=(fL-*outL)*(1.0-g); *outR+=(fR-*outR)*(1.0-g);
 }
 
 /* Studer 961/962 "Faecherentzerrer" (fan equaliser) of the 1.960.221 mono input unit.
@@ -870,7 +886,7 @@ static void punch_slot_start(loopex_t *s, PunchSlot *ps, int idx){
     else if(d->mech==PM_PALETTE){ memset(ps->poutL,0,sizeof ps->poutL); memset(ps->poutR,0,sizeof ps->poutR); }
     else if(d->mech==PM_PITCH){ ps->readPhase=2048.0; }   /* mid-window delay (2-head shifter) */
     else if(d->mech==PM_HAZE||d->mech==PM_STRETCH||d->mech==PM_MOSAIC||d->mech==PM_SMEAR||d->mech==PM_STRUM){
-        for(int i=0;i<4;i++)ps->gAct[i]=0; ps->gSched=1e12; ps->gIdx=0; ps->gPrime=1; ps->stGrid=(double)ps->w-4000.0;
+        for(int i=0;i<PUNCH_GRAINS;i++)ps->gAct[i]=0; ps->gSched=1e12; ps->gIdx=0; ps->gPrime=1; ps->stGrid=(double)ps->w-4000.0;
         memset(ps->shL,0,sizeof ps->shL); memset(ps->shR,0,sizeof ps->shR); ps->shW=0; ps->shR1=0.0; }   /* clear the Stretch doubler ring */   /* gSched primed: no wait before the first grain */
     else if(d->mech==PM_SHIMMER){ ps->shR1=2048.0; ps->shFbL=ps->shFbR=0.0; ps->shW=0; ps->shFill=0;
         ps->shDcXL=ps->shDcYL=ps->shDcXR=ps->shDcYR=0.0f;
@@ -968,18 +984,32 @@ static void fxseq_tick(loopex_t *s, int frames){
     }
 }
 
-/* Spawn a grain in the shared pool. rate<0 reads backwards. Returns the slot or -1. */
+/* Spawn a grain in the shared pool. rate<0 reads backwards. Always returns a slot.
+ * The pool used to be 4 deep and DROPPED the grain when full, which made Density and pad
+ * pressure inert over most of their travel: Haze asks for dens*dur concurrent grains, up to
+ * 168/s * 0.43 s = 72, so past ~18-38%% of the knob (depending on Size) nothing further
+ * reached the ear. With a deeper pool the request is nearly always met; when it is not, steal
+ * the grain nearest the end of its Hann window - it is already fading out, so replacing it is
+ * the least audible choice, and density degrades smoothly instead of hitting a wall. */
 static inline int punch_grain(PunchSlot *ps, double pos, double dur, double rate, double pan){
-    for(int i=0;i<4;i++) if(!ps->gAct[i]){ ps->gAct[i]=1; ps->gAge[i]=0.0; ps->gDur[i]=dur; ps->gRate[i]=rate; ps->gPos[i]=pos;
-        ps->gGl[i]=0.5*(1.0-pan); ps->gGr[i]=0.5*(1.0+pan); return i; }
-    return -1;
+    int k=-1;
+    for(int i=0;i<PUNCH_GRAINS;i++) if(!ps->gAct[i]){ k=i; break; }
+    if(k<0){ double worst=-1.0;
+        for(int i=0;i<PUNCH_GRAINS;i++){ double d=ps->gDur[i]; double w=(d>0.0)?ps->gAge[i]/d:1e9;
+            if(w>worst){ worst=w; k=i; } } }
+    if(k<0)k=0;
+    ps->gAct[k]=1; ps->gAge[k]=0.0; ps->gDur[k]=dur; ps->gRate[k]=rate; ps->gPos[k]=pos;
+    ps->gGl[k]=0.5*(1.0-pan); ps->gGr[k]=0.5*(1.0+pan); return k;
 }
 /* Sum the active grains (Hann windows). */
 static inline void punch_grains_out(PunchSlot *ps, double *sl, double *sr){
-    double l=0.0,r=0.0;
-    for(int i=0;i<4;i++){ if(!ps->gAct[i])continue; double wph=ps->gAge[i]/ps->gDur[i]; if(wph>=1.0){ps->gAct[i]=0;continue;}
+    double l=0.0,r=0.0; int n=0;
+    for(int i=0;i<PUNCH_GRAINS;i++){ if(!ps->gAct[i])continue; double wph=ps->gAge[i]/ps->gDur[i]; if(wph>=1.0){ps->gAct[i]=0;continue;}
         double win=0.5-0.5*cos(TWOPI*wph), rp=ps->gPos[i]+ps->gAge[i]*ps->gRate[i];
-        l+=(double)ring_read(ps->ringL,rp)*win*ps->gGl[i]; r+=(double)ring_read(ps->ringR,rp)*win*ps->gGr[i]; ps->gAge[i]+=1.0; }
+        l+=(double)ring_read(ps->ringL,rp)*win*ps->gGl[i]; r+=(double)ring_read(ps->ringR,rp)*win*ps->gGr[i]; ps->gAge[i]+=1.0; n++; }
+    /* Grains are mutually incoherent, so they sum in POWER: normalise by sqrt(n) or Density
+     * would read as a loudness control. Deeper pool = denser cloud at the same level. */
+    if(n>1){ double g=1.0/sqrt((double)n); l*=g; r*=g; }
     *sl=l; *sr=r;
 }
 /* per-sample: one slot reads its own ring and produces wet (ring already written by caller).
@@ -1548,7 +1578,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     s->driftSm[4]=0.0f; s->driftSm[5]=0.40f; s->driftSm[6]=0.40f; s->driftSm[7]=0.0f;
     s->mfCut=1.0f; s->mfReso=0.0f; s->mfCutSm=1.0f; s->mfResoSm=0.0f; s->mfMode=0; s->mClock=0.5f; s->mClockMode=0; s->mClockSpot=0; s->mclkRatioSm=1.0f; s->mclkWet=0.0f;
     s->perfTrem=0.0f; s->perfTremRate=0.08f; s->punchWidth=0.5f;   /* rate default -> di 0 = one pump per beat */
-    s->masterEQ=0; s->masterGlue=0.0f; s->tapeLimit=0.0f; master_eq_update(s); s->inSource=0; s->loopFilterMode=0;
+    s->masterEQ=1; s->masterGlue=0.0f;   /* 1 = MEQ_962 (enum declared later); asserted below */ s->tapeLimit=0.0f; master_eq_update(s); s->inSource=0; s->loopFilterMode=0;
     s->laShm=NULL; s->laFd=-1; s->laRead=0; s->laSlotCur=-1;
     { int fd=shm_open(LA_IN_SHM_NAME,O_RDONLY,0);   /* map Move's per-track audio if the host is streaming it */
       if(fd>=0){ void *p=mmap(NULL,sizeof(la_in_shm_t),PROT_READ,MAP_SHARED,fd,0);
@@ -1864,43 +1894,63 @@ static inline void perf_pump(loopex_t *s, double *l, double *r){
 
  * the spirit of the named units, not measured curves. */
 
-enum { MEQ_OFF=0, MEQ_STUDER, MEQ_NEVE, MEQ_SSL, MEQ_API, MEQ_SP12, MEQ_MPC, MEQ_EMU, MEQ_AMPEX, MEQ_JUNO, MEQ_CONSOLE, MEQ_N };
+/* Display order: transparent -> console colour -> tape -> lo-fi samplers (the gritty end).
+ * Sessions store the NAME, not this index, so the list can be reordered freely; legacy
+ * sessions that stored a raw index are remapped in set_param. */
+enum { MEQ_OFF=0, MEQ_962, MEQ_CONSOLE, MEQ_NEVE, MEQ_SSL, MEQ_API, MEQ_STUDER, MEQ_AMPEX, MEQ_JUNO, MEQ_SP12, MEQ_MPC, MEQ_EMU, MEQ_N };
+_Static_assert(MEQ_962==1, "create_instance defaults masterEQ to the literal 1");
 
-static const char *meq_opts[MEQ_N] = { "Off","Studer","Neve","SSL","API","SP12","MPC","Emu","Ampex","Juno","Console" };
+static const char *meq_opts[MEQ_N] = { "Off","962","Console","Neve","SSL","API","Studer","Ampex","Juno","SP12","MPC","Emu" };
 
-/* {loHz,loDb, midHz,midDb,midQ, hiHz,hiDb, sat, crushHz(0=none), makeupDb} */
+/* {loHz,loDb, midHz,midDb,midQ, hiHz,hiDb, sat, crushHz(0=none), makeupDb, grit} */
+/* `962` = the Studer 961/962 mixing DESK, per its service manual 1.7.2: response
+ * +0.5/-1 dB, -3 dB at 4.5 Hz and 45 kHz, THD <0.03% at +6 dBu, EIN <=-125 dBu. A
+ * broadcast desk built to be transparent, so it is voiced as almost nothing: a touch of
+ * LF tightening for the 4.5 Hz corner, -0.7 dB at 16 kHz for the band edge, and barely
+ * any saturation. It is the same machine whose channel EQ studer_eq_update models.
+ * `Studer` stays the A800 TAPE machine - a different device, hence the head bump. */
+/* `grit` (0..1) relaxes the loop reader back toward a vintage sampler's: it crossfades the
+ * Hermite read to plain linear AND blends out the rate-aware anti-imaging filter. At 1.0 the
+ * slow-down path is exactly what it was before both upgrades - interpolation images and all.
+ * That artefact IS the sound of a 12-bit sampler pitched down, so it belongs to the sampler
+ * voicings and nowhere else; the console and tape models stay clean, because a console has no
+ * interpolator to be dirty with. */
 
-static const double MEQ_DEF[MEQ_N][10] = {
+static const double MEQ_DEF[MEQ_N][11] = {
 
-    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 },   /* Off */
+    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 , 0.00 },   /* Off — bypassed */
 
-    { 120, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 },   /* Studer A800 — tape head bump + airy HF, soft sat */
+    {  40,-0.5,    0, 0.0,0.7, 16000,-0.7, 0.03,     0, -0.1 , 0.00 },   /* Studer 961/962 desk — transparent by design (see note) */
 
-    {  90, 2.5,  500,-1.0,0.7, 14000, 3.5, 0.14,     0, -1.8 },   /* Neve 1073 — warm lows, silky top */
+    { 130, 1.0, 1200, 0.8,0.8, 11000, 1.8, 0.16,     0, -1.2 , 0.00 },   /* Console — neutral glue colour */
 
-    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 },   /* SSL bus — tight lows, present mids */
+    {  90, 2.5,  500,-1.0,0.7, 14000, 3.5, 0.14,     0, -1.8 , 0.00 },   /* Neve 1073 — warm lows, silky top */
 
-    { 100, 1.0,  900, 2.5,1.1,  6000, 1.0, 0.20,     0, -1.6 },   /* API — punchy mids, fast */
+    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 , 0.00 },   /* SSL bus — tight lows, present mids */
 
-    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26000, -1.0 },   /* SP-1200 — 12-bit crunch, rolled top */
+    { 100, 1.0,  900, 2.5,1.1,  6000, 1.0, 0.20,     0, -1.6 , 0.00 },   /* API — punchy mids, fast */
 
-    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 30000, -1.2 },   /* MPC60 — fat 12-bit, warm */
+    { 120, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00 },   /* Studer A800 — tape head bump + airy HF, soft sat */
 
-    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 22000, -0.6 },   /* Emu SP — dark, gritty converter */
+    { 100, 3.5,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00 },   /* Ampex ATR — fat, saturated */
 
-    { 100, 3.5,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 },   /* Ampex ATR — fat, saturated */
+    { 160,-0.5, 2500, 2.0,1.0, 13000, 2.0, 0.08,     0, -0.8 , 0.00 },   /* Juno chorus-console — bright, glassy */
 
-    { 160,-0.5, 2500, 2.0,1.0, 13000, 2.0, 0.08,     0, -0.8 },   /* Juno chorus-console — bright, glassy */
+    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26000, -1.0 , 1.00 },   /* SP-1200 — 12-bit crunch, rolled top */
 
-    { 130, 1.0, 1200, 0.8,0.8, 11000, 1.8, 0.16,     0, -1.2 },   /* Console — neutral glue colour */
+    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 30000, -1.2 , 0.80 },   /* MPC60 — fat 12-bit, warm */
+
+    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 22000, -0.6 , 1.00 },   /* Emu SP — dark, gritty converter */
 
 };
+
 
 static void master_eq_update(loopex_t *s){
 
     int p=s->masterEQ; if(p<0)p=0; if(p>=MEQ_N)p=MEQ_N-1;
 
     const double *d=MEQ_DEF[p];
+    g_interpGrit=(float)d[10];   /* sampler voicings relax the loop reader; consoles and tape do not */
 
     if(fabs(d[1])>0.05) bq_set_lowshelf(&s->eqLoSh,d[0],d[1],0.7); else bq_reset(&s->eqLoSh);
 
@@ -2423,7 +2473,11 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"mClockSpot")==0){ static const char*o[]={"Pre","Post"}; int i=match_enum(val,o,2); s->mClockSpot=(i>=0)?i:(atof(val)>0.5?1:0); return; }
     if(strcmp(key,"inSource")==0){ int i=match_enum(val,insrc_opts,11); s->inSource=(i>=0)?i:(int)lb_clampf((float)atof(val),0,10); return; }
     SETFR("perfTrem",perfTrem,0.0,1.0) SETFR("perfTremRate",perfTremRate,0.0,1.0) SETFR("punchWidth",punchWidth,0.0,1.0)
-    if(strcmp(key,"masterEQ")==0){ int i=match_enum(val,meq_opts,MEQ_N); s->masterEQ=(i>=0)?i:(int)lb_clampf((float)atof(val),0,MEQ_N-1); master_eq_update(s); return; }
+    if(strcmp(key,"masterEQ")==0){ int i=match_enum(val,meq_opts,MEQ_N);
+        if(i<0){   /* sessions written before the reorder stored a raw index in the old order */
+            static const int MEQ_LEGACY[12]={0,6,3,4,5,9,10,11,7,8,2,1};
+            i=MEQ_LEGACY[(int)lb_clampf((float)atof(val),0,11)]; }
+        s->masterEQ=i; master_eq_update(s); return; }
     if(strcmp(key,"loopFiltMode")==0){ int i=match_enum(val,mfmode_opts,MF_NVOICE); s->loopFilterMode=(i>=0)?i:(int)lb_clampf((float)atof(val),0,MF_NVOICE-1); return; }
     SETFR("masterGlue",masterGlue,0.0,1.0) SETFR("tapeLimit",tapeLimit,0.0,1.0)
     SETFR("driftAmt",driftAmt,0.0,1.0) SETFR("driftRate",driftRate,0.0,1.0)
@@ -2833,6 +2887,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
         #define APP(...) do{ int _r=buf_len-p; if(_r>0){ int _n=snprintf(buf+p,(size_t)_r,__VA_ARGS__); if(_n<0){trunc=1;} else if(_n>=_r){p=buf_len;trunc=1;} else p+=_n; } else trunc=1; }while(0)
         #define WF(k,val) APP("%s=%.4f\n",k,(double)(val))
         #define WI(k,val) APP("%s=%d\n",k,(int)(val))
+        #define WS(k,val) APP("%s=%s\n",k,(val))
         WF("globalSat",s->globalSat);WF("masterComp",s->masterComp);
         WI("masterLoCut",(int)s->masterLoCut);WI("masterHiCut",(int)s->masterHiCut);
         WI("preamp",(int)s->preamp);WI("overdubMode",(int)s->overdubMode);
@@ -2848,7 +2903,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
         WF("mfCut",s->mfCut);WF("mfReso",s->mfReso);WI("mfMode",s->mfMode);
         WF("mClock",s->mClock);WI("mClockMode",s->mClockMode);WI("mClockSpot",s->mClockSpot);
         WF("perfTrem",s->perfTrem);WF("perfTremRate",s->perfTremRate);WF("punchWidth",s->punchWidth);
-        WI("masterEQ",s->masterEQ);WF("masterGlue",s->masterGlue);WF("tapeLimit",s->tapeLimit);
+        WS("masterEQ",meq_opts[s->masterEQ]);WF("masterGlue",s->masterGlue);WF("tapeLimit",s->tapeLimit);
         for(int pi=0;pi<NUM_PUNCH;pi++) APP("pfl%d=%.4f,%.4f,%.4f,%.4f\n",pi,
             (double)s->punchLfo[pi][0],(double)s->punchLfo[pi][1],(double)s->punchLfo[pi][2],(double)s->punchLfo[pi][3]);
         /* Input / Tape chain */

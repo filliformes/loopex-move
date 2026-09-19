@@ -247,7 +247,7 @@
   </div>
   </div>
   <div class="grid g2" style="margin-top:22px">
-    <div class="card k"><h3>Loop pads (left)</h3><p>Tap to record / play / pause. Double-tap to overdub. Hold to clear. Colour shows state, tinted by playback speed.</p></div>
+    <div class="card k"><h3>Loop pads (left)</h3><p>Tap to record / play / pause — un-pausing restarts the loop from its Start point, re-phasing all four playheads. <b>Undo + pad</b> overdubs. Hold to clear. Colour shows state, tinted by playback speed.</p></div>
     <div class="card k"><h3>Punch pads (right)</h3><p>Hold to apply a momentary effect on the master. Coloured by family. Up to five stack in series; pressure adds intensity.</p></div>
     <div class="card k"><h3>Steps + arrows</h3><p>A step selects a loop and shows its waveform. <kbd>Up</kbd>/<kbd>Down</kbd> move between its four pages. <kbd>◀ ▶</kbd> are the tape brake / wind.</p></div>
     <div class="card k"><h3>Jog wheel</h3><p>Scrubs the selected loop like tape: audibly, even when paused. On the Playheads page it moves the touched head.</p></div>
@@ -287,6 +287,8 @@
     <div class="card"><h3>Seed</h3><p>A seeded re-order of the loop's slices (2/4/8/16, some reversed). The knob <em>is</em> the seed: every position is a different, repeatable mangle. Click-free.</p></div>
     <div class="card"><h3>Scatter</h3><p>Stochastic slice jumps with crossfades: from gentle stutter to full shuffle.</p></div>
     <div class="card"><h3>Filter + Reso</h3><p>A DJ-style filter: low-pass left of centre, high-pass right, with resonance. Smoothed, so sweeps never step.</p></div>
+    <div class="card"><h3>Studer EQ</h3><p>The 961/962 channel EQ, a <em>F&auml;cherentzerrer</em> (fan equaliser): every setting crosses 0&nbsp;dB at a ~1&nbsp;kHz pivot and slopes continuously outward, with no shelf plateau in the band. Bass reaches &plusmn;15&nbsp;dB at 20&nbsp;Hz, Treble &plusmn;15&nbsp;dB at 20&nbsp;kHz. Corners and slopes are fitted to the curves printed in Studer’s service manual.</p></div>
+    <div class="card"><h3>Presence</h3><p>The console’s Pr&auml;senz/Absenz band: a &plusmn;11&nbsp;dB peak at Q&nbsp;=&nbsp;1, sweepable 150&nbsp;Hz&ndash;7&nbsp;kHz, to the published spec. <b>Tilt</b> sits alongside it and tips the whole spectrum about 800&nbsp;Hz.</p></div>
   </div>
 </section>
 
@@ -376,7 +378,7 @@
     <tr><td>Console</td><td>neutral glue colour</td></tr>
   </table></div>
   <h3>Loop Filter and record source (Settings page 1)</h3>
-  <p><b>Loop Filter</b> gives every loop the same twelve analog voicings as the Master Filter (Clean, SEM, MS-20, Steiner, four ladders, Prophet, Oberheim, Diode, K35, Vintage): the loop Filter knob sweeps and its low-pass takes on the chosen model, resonance from Reso. <b>Input source</b> (<b>InSrc</b>) chooses what each new recording samples: <b>Line</b> (the line/mic input, default), <b>Master</b> (the whole Move mix, minus Loopex’s own output so it never feeds back), <b>S1–S4</b> (Schwung’s four mixer slots) or <b>M1–M4</b> (the four OG Move hardware tracks). The per-track sources arrive over <b>Ableton Link Audio</b> — the host publishes its slots on <code>/schwung-pub-audio</code> and reconstructs the Move tracks on <code>/schwung-link-in</code>, each as an isolated stereo stem — so a loop can sample any single Schwung or Move track on its own, not just the summed mix (needs the host’s <code>link_audio_publish</code>, on by default).</p>
+  <p><b>Loop Filter</b> gives every loop the same twelve analog voicings as the Master Filter (Clean, SEM, MS-20, Steiner, four ladders, Prophet, Oberheim, Diode, K35, Vintage): the loop Filter knob sweeps and its low-pass takes on the chosen model, resonance from Reso. <b>Input source</b> (<b>InSrc</b>) chooses what each new recording samples: <b>Line</b> (the line/mic input, default), <b>Master</b> (the whole Move mix, minus Loopex’s own output so it never feeds back), <b>S1–S4</b> (Schwung’s four mixer slots) <b>M1–M4</b> (the four OG Move hardware tracks) or <b>Self</b>. <b>Self</b> is Loopex’s own master output, one block old — every loop, the punch chain, both sends and the master stage — so you can resample the whole mix back into a new loop. Unlike <b>Master</b> it has <em>no</em> feedback guard, because the regeneration is the point; the tape limiter at the end of the master chain keeps it saturating rather than running away, and Input Gain is the control. The per-track sources arrive over <b>Ableton Link Audio</b> — the host publishes its slots on <code>/schwung-pub-audio</code> and reconstructs the Move tracks on <code>/schwung-link-in</code>, each as an isolated stereo stem — so a loop can sample any single Schwung or Move track on its own, not just the summed mix (needs the host’s <code>link_audio_publish</code>, on by default).</p>
   <p class="muted">Settings page 1 also holds arm threshold, overdub mode, root note, input monitoring, and MIDI In / MIDI Out; page 2 adds the punch-FX stereo width (mono → wide, per effect).</p>
 </section>
 
@@ -416,7 +418,7 @@
     <tr><th>Gesture</th><th>Action</th></tr>
     <tr><th colspan="2">Left 16 pads: the loops</th></tr>
     <tr><td>Tap</td><td>record → play ⇄ pause</td></tr>
-    <tr><td>Double-tap</td><td>overdub (tap again to stop)</td></tr>
+    <tr><td>Undo + pad</td><td>overdub (tap again to stop)</td></tr>
     <tr><td>Hold (~1 s)</td><td>clear the loop (Undo restores)</td></tr>
     <tr><td>Shift + left pad</td><td>cycle playback speed ½× · 1× · 2×</td></tr>
     <tr><td>Mute + left pad</td><td>quick mute (stays in phase)</td></tr>

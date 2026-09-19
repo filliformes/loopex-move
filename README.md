@@ -140,13 +140,17 @@ cores 0–2, never on the audio callback. Sessions live in
   (the 12 Master-filter voicings applied to every loop's low-pass), root note, input monitoring,
   **input source** (see below), MIDI In and MIDI Out. Page 2 is the master — Master Out, master Lo/Hi
   cut, punch width, character EQ, global sat (to 2.0), glue and tape limiter.
-- **Record source (Settings p1 → InSrc):** `Line · Master · S1 · S2 · S3 · S4 · M1 · M2 · M3 · M4`.
+- **Record source (Settings p1 → InSrc):** `Line · Master · S1 · S2 · S3 · S4 · M1 · M2 · M3 · M4 · Self`.
   **Line** is the line/mic input (default). **Master** is the Move's whole master mix, minus Loopex's
   own output so it can never feed back. **S1–S4** are Schwung's own four mixer slots and **M1–M4** the
   four OG Move hardware tracks, each captured as an isolated stereo stem over **Ableton Link Audio**:
   the host publishes its slots on `/schwung-pub-audio` and reconstructs the Move tracks on
   `/schwung-link-in`, and Loopex reads the selected channel (needs the host's `link_audio_publish`, on
   by default). So a loop can sample any single Schwung or Move track on its own, not just the summed mix.
+  **Self** is Loopex's own master output, one block (2.9 ms) old — every loop, the punch chain, both
+  sends and the master stage — so you can resample the whole mix back into a new loop. Unlike
+  **Master** it carries *no* feedback guard, because the regeneration is the point: the tape limiter
+  at the end of the master chain keeps it saturating instead of diverging, and InGain is the control.
 - **Undo** reverts the last overdub exactly (each overwritten sample is saved as it goes), else restores the last cleared loop.
 
 ### LaunchControl XL (external MIDI)
@@ -169,8 +173,8 @@ channel-1 pads.
 ### Pads and steps
 | Gesture | Action |
 |---------|--------|
-| **Tap** left pad | cycle Empty → Rec → Play ⇄ Pause |
-| **Double-tap** (playing) | Overdub |
+| **Tap** left pad | cycle Empty → Rec → Play ⇄ Pause (un-pause restarts from Start) |
+| **Undo + pad** (playing/paused) | Overdub (tap again to stop) |
 | **Hold** left pad (~1 s) | Clear the loop *(Undo restores it)* |
 | **Shift + tap** | cycle playback speed (½× / 1× / 2×) |
 | **Mute + tap** | quick-mute (playhead keeps running — returns in phase) |
@@ -339,7 +343,10 @@ license (see `overtake-shell/vendor/` and the file headers); the rest is inspira
 - **Chase Bliss Blooper, Mood MK2, Generation Loss MK2** — Stability, the old Clock's
   degradation, Disintegration overdub, Generations. https://www.chasebliss.com
 - **Hologram Microcosm** — the grain and glide punch families. https://hologramelectronics.com/microcosm
-- **Studer 962** — the per-loop channel EQ, voiced from the broadcast console's schematic band specs.
+- **Studer 961/962** — the per-loop channel EQ, modelled on the console's *Fächerentzerrer* (fan
+  equaliser) in the 1.960.221 input unit. Bass and Treble corners and slopes are a least-squares
+  fit to the response curves printed in the service manual (§1.7.2 / D 3/3), digitised off the
+  plot; Mid follows the published Q = 1, 150 Hz–7 kHz, ±11 dB presence spec.
 - **Soma Laboratory COSMOS** — the Drift memory: prime-length shifting delay lines that recombine
   endlessly into an ever-evolving ambient layer. https://somasynths.com/cosmos/
 - **norns loopers** — wrms, concrète, cranes, oooooo, otis, reels, ndls, samsara, mlre, nydl,

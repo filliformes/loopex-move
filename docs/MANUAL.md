@@ -36,8 +36,8 @@ The screen has three views: the **overview** (track strip, CPU, input level, foo
 |---|---|
 | Tap an empty pad | start recording (up to 45 s) |
 | Tap while recording | close the loop and play |
-| Tap while playing | pause · tap again to resume (click-free) |
-| Double-tap while playing or paused | overdub · tap again to stop overdubbing |
+| Tap while playing | pause · tap again to restart from Start (click-free) |
+| **Undo + pad** while playing or paused | overdub · tap again to stop overdubbing |
 | Hold a pad (~1 s) | clear the loop (Undo restores it) |
 | Shift + tap | cycle playback speed ½× · 1× · 2× |
 | Mute + tap | quick mute; the playhead keeps running so the loop returns in phase |
@@ -78,7 +78,12 @@ Press a **step** to select that loop: the screen shows its waveform with the act
 - **Wow/Flutter** — per-loop tape instability.
 - **Scatter** — random slice jumps, crossfaded.
 - **Seed** — a seeded slice re-order (2/4/8/16 slices, some reversed). The knob *is* the seed: every position is a different, repeatable mangle.
-- **Bass / Mid Freq / Mid Gain / Treble** — a Studer-style channel EQ. **Tilt** tips the whole spectrum.
+- **Bass / Mid Freq / Mid Gain / Treble** — the Studer 961/962 channel EQ, a *fan equaliser*:
+  every setting crosses 0 dB at a ~1 kHz pivot and slopes continuously outward, with no shelf
+  plateau in the audio band. Bass reaches ±15 dB at 20 Hz, Treble ±15 dB at 20 kHz — those are
+  the gains at the edges of the band, which is why the controls stay gentle and musical in the
+  middle. Mid is a ±11 dB presence peak (Q = 1) sweepable 150 Hz–7 kHz.
+  **Tilt** tips the whole spectrum.
 - **Attack / Decay** — a per-loop amplitude envelope (3 ms – 3 s / 5 s) used on trigger, mute, pause and stop.
 - **Heads ▸** — jumps to the Playheads page.
 
@@ -156,13 +161,18 @@ Press the same button again, or **Back**, to close a menu. Enums step once per f
 - **Perform** — Stumble (a probabilistic step glitcher), plus **Jump** (crossfaded random jump on every playing loop) and **Scan** (a fast sweep) as buttons.
 - **Drift** (Sample button) — a global drifting-delay memory in the spirit of Soma COSMOS. Four coprime-length delay lines, each read at a slowly drifting tap, feed back through a matrix that morphs from self-feedback to a normalised Hadamard cross-mix. The loop mix feeds it, the memory recirculates, and because the line lengths are coprime and each has its own asynchronous LFO, the recombination never lands on an exact repeat. It sits in the master chain just before the pump, so the ambient layer picks up the character EQ, glue and limiter. Feedback is capped below unity, so the tail always fades (up to a few minutes at maximum), and a **silence bleed** clears an abandoned tail after about eight seconds with no input. Knobs: **Drift** (how much loop mix is fed in) · **Rate** (tap-drift speed) · **Size** (tap length, shimmer to long hall) · **FBk** (memory sustain, below unity fades, near unity holds) · **Supr** (loud new input erases old memory: play over to replace) · **Blur** (self-feedback → full cross-mix) · **Damp** (high-frequency damping of the tail) · **Mix** (wet level into the master). Drift and Mix start at zero, so it is silent until dialled in; it saves with the session.
 - **InSrc** (input source, Settings page 1) — what each new recording samples:
-  `Line · Master · S1 · S2 · S3 · S4 · M1 · M2 · M3 · M4`. **Line** is the line/mic input (default).
+  `Line · Master · S1 · S2 · S3 · S4 · M1 · M2 · M3 · M4 · Self`. **Line** is the line/mic input (default).
   **Master** is the Move's whole master mix, minus Loopex's own output so the master can never feed back.
   **S1–S4** are Schwung's own four mixer slots and **M1–M4** the four OG Move hardware tracks, each
   captured as its own isolated stereo stem over **Ableton Link Audio** — the host publishes its slots on
   `/schwung-pub-audio` and reconstructs the Move tracks on `/schwung-link-in`, and Loopex records the
   selected channel. This lets a loop sample any single Schwung or Move track in isolation, not just the
   summed mix. It needs the host's `link_audio_publish` (on by default).
+  **Self** is Loopex's own master output, one block (2.9 ms) old — every loop, the punch chain, both
+  sends and the master stage — so you can resample the entire mix back into a new loop (bounce,
+  layer, regenerate). Unlike **Master** it has *no* feedback guard, because the regeneration is the
+  point: the tape limiter at the end of the master chain makes it saturate rather than run away, and
+  **InGain** is how you control how hard it builds.
 - **MIDI In** — off by default so Move's track MIDI cannot trigger loops. On, an external keyboard plays the selected loop chromatically with 8-voice polyphony, and a LaunchControl XL drives all sixteen loops (section 9).
 - **MIDI Out** — mirrors each loop's transport state to the LaunchControl XL's LEDs (section 9).
 
@@ -242,7 +252,7 @@ A Novation LaunchControl XL can play all sixteen loops from hardware. **MIDI In*
 
 | Keys | Action |
 |---|---|
-| Pad tap / double-tap / hold | rec-play-pause · overdub · clear |
+| Pad tap / Undo+pad / hold | rec-play-pause · overdub · clear |
 | Shift + pad | speed ½× 1× 2× |
 | Mute + pad · Copy + pad, pad · Loop + pad | quick mute · clone · loop length |
 | Shift + Sample (+ jog) | threshold-arm (+ threshold) |

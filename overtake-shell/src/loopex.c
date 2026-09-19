@@ -176,7 +176,13 @@ static inline void lb_loop_read(const int16_t *bl, const int16_t *br, int L, dou
 
 /* ---- Biquad ---- */
 typedef struct { double b0, b1, b2, a1, a2, z1L, z2L, z1R, z2R; } Biquad;
-static void bq_reset(Biquad *f) { memset(f, 0, sizeof(Biquad)); }
+/* Reset = make the filter INERT, i.e. a unity pass-through. Zeroing the whole struct also
+ * zeroes b0, and this is transposed direct form II, so an all-zero biquad does not bypass -
+ * it outputs SILENCE. master_character ticks its three bands unconditionally, so the first
+ * Character voicing with a genuinely flat band would reset eqMidPk and mute the whole master
+ * bus. Every shipped voicing happens to have a non-zero mid, and Off returns early, which is
+ * the only reason this had never fired. The input EQ has the same shape. */
+static void bq_reset(Biquad *f) { memset(f, 0, sizeof(Biquad)); f->b0 = 1.0; }
 static void bq_set_lp(Biquad *f, double freq, double Q) {
     double w0=TWOPI*freq/SR,cosW=cos(w0),alpha=sin(w0)/(2.0*Q),a0=1.0+alpha;
     f->b0=(1.0-cosW)/2.0/a0;f->b1=(1.0-cosW)/a0;f->b2=f->b0;f->a1=(-2.0*cosW)/a0;f->a2=(1.0-alpha)/a0;

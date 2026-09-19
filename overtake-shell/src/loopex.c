@@ -129,6 +129,51 @@ static inline int16_t lb_quant16(double x, uint32_t *rng) {
     return (int16_t)q;
 }
 
+/* 4-point Catmull-Rom Hermite interpolation for fractional reads.
+ * Linear interpolation is a fractional-delay-dependent low-pass: it dulls pitch-shifted
+ * playback and adds broadband interpolation noise on every voice and head. Hermite costs
+ * two extra taps and a handful of multiplies and is far flatter.
+ * IMPORTANT: at f == 0 this returns x0 exactly, same as linear — so playback at unity rate
+ * (Speed 0, no tape transport, head mult 1) keeps integer phase and is BIT-IDENTICAL to
+ * the old code. Only genuinely fractional reads change. */
+/* One-pole DC blocker for feedback paths. R = 1 - 2*pi*fc/SR; 0.99715 is ~20 Hz at 44.1k.
+ * A recirculating loop integrates any offset it is fed - from an input with a DC component,
+ * or from an asymmetric stage inside the loop - and the offset then biases the saturator it
+ * passes through, eating headroom asymmetrically and dulling the tail long before it is
+ * audible as "DC". Nothing in this module high-passed any feedback path before this. */
+#define LB_DCR 0.99715
+static inline double lb_dcblock(double x, float *x1, float *y1) {
+    double y = x - (double)*x1 + LB_DCR * (double)*y1;
+    *x1 = (float)x; *y1 = (float)y;
+    return y;
+}
+static inline double lb_hermite(double xm1, double x0, double x1, double x2, double f) {
+    double c=(x1-xm1)*0.5, vv=x0-x1, w=c+vv, a=w+vv+(x2-x0)*0.5, b=w+a;
+    return ((((a*f)-b)*f+c)*f+x0);
+}
+/* Rate-aware anti-imaging, applied per playhead. Reading the buffer slower than unity
+ * reconstructs the signal imperfectly: the residual images of the source spectrum land at
+ * (SR - f)*rate, so they always sit inside [Nyquist*rate, SR*rate], while the wanted signal
+ * can only ever occupy [0, Nyquist*rate]. The two never overlap, so a low-pass at rate*Nyquist
+ * removes the images without touching a single Hz of real signal - this is not a darkening,
+ * it is the reconstruction filter a 4-point kernel cannot provide on its own. Measured against
+ * the kernel: at rate 0.70 with 14 kHz content the worst image goes from -16 dB to -42 dB.
+ * Unity and above are bypassed, which also keeps unity playback bit-exact (lb_hermite returns
+ * x0 at f=0). Faster than unity is ALIASING, not imaging - a different problem needing the
+ * buffer pre-filtered, deliberately not addressed here. */
+/* Hermite read of a stereo int16 loop buffer of length L, normalized to +/-1.
+ * q must already be wrapped into [0, L). */
+static inline void lb_loop_read(const int16_t *bl, const int16_t *br, int L, double q,
+                                double *l, double *r) {
+    int i0=(int)q; if(i0<0)i0=0; if(i0>=L)i0=L-1;
+    double f=q-floor(q);
+    int im1=i0-1; if(im1<0)im1+=L;
+    int i1=i0+1; if(i1>=L)i1-=L;
+    int i2=i1+1; if(i2>=L)i2-=L;
+    *l=lb_hermite((double)bl[im1],(double)bl[i0],(double)bl[i1],(double)bl[i2],f)/32768.0;
+    *r=lb_hermite((double)br[im1],(double)br[i0],(double)br[i1],(double)br[i2],f)/32768.0;
+}
+
 /* ---- Biquad ---- */
 typedef struct { double b0, b1, b2, a1, a2, z1L, z2L, z1R, z2R; } Biquad;
 static void bq_reset(Biquad *f) { memset(f, 0, sizeof(Biquad)); }
@@ -243,9 +288,16 @@ typedef struct {
     int armed;                            /* threshold-armed record: waiting for input to cross */
     Playhead ph[4];                       /* up to 4 simultaneous read heads */
     float hVol[4], hPan[4];               /* per-head Vol/Pan (heads 1-3; head 0 uses the loop's volume/pan) */
-    int scrubTimer; double scrubRate;     /* jog scrub: audible tape rock */
+    int scrubTimer; double scrubRate, scrubTgt; float scrubMix;   /* jog scrub: audible tape rock.
+                                           * scrubTgt = the rate the latest detent asked for, scrubRate
+                                           * glides toward it, scrubMix blends scrub vs transport so the
+                                           * gesture eases in and out instead of cutting. */
     float filterSm; double volSm, panSm;  /* 10ms smoothing on the steppy knobs */
     int savedLoopLen;                     /* clear-undo: last loop length before a clear */
+    int dubSamples;                       /* cumulative overdub time, for the DUB readout */
+    int retrigPend;                       /* un-pause: rewind head 0 AND heads 1-3 to Start, consumed in render */
+    Biquad aiLp[4]; float aiCache[4];     /* per-head rate-aware anti-imaging low-pass */
+    int disintGen;                        /* Disintegration passes applied: each one is darker than the last */
     float djReso;                         /* DJ filter resonance (Q) */
     float djWet, djWetTgt;                /* DJ filter dry->filtered blend + its target; the swap waits for djWet~0 */
     float comp, clock;                    /* per-track compressor amount; clock = independent PITCH shift in octaves (-2..2), not the playback rate */
@@ -359,6 +411,7 @@ typedef struct {
     float pinL[128],pinR[128],poutL[128],poutR[128];
     /* shimmer 2-head pitch-shift + LP feedback */
     float shL[SHBUF], shR[SHBUF]; int shW, shFill; double shR1, shFbL, shFbR;
+    float shDcXL, shDcYL, shDcXR, shDcYR;   /* DC blocker in the Shimmer regen loop */
     float dblBuf[1024]; int dblW, dblHold; double dblPh; float dblGain;   /* shared stereo microshifter */
 } PunchSlot;
 
@@ -366,7 +419,7 @@ typedef struct {
     float globalSat,masterComp,masterLoCut,masterHiCut,masterVol;
     float preamp,overdubMode,stability;int selTrack;
     float globalWowFlut,inputMonitor,inputGain;
-    int inSource;                          /* 0 Line, 1 Master, 2-5 = Schwung S1-4 (pub), 6-9 = Move M1-4 (link-in) */
+    int inSource;                          /* 0 Line, 1 Master, 2-5 = Schwung S1-4 (pub), 6-9 = Move M1-4 (link-in), 10 = own master out */
     la_in_shm_t *laShm; int laFd; uint32_t laRead; int laSlotCur;   /* Link Audio track source (OG Move tracks) */
     bpa_shm_t *bpaShm; int bpaFd; uint32_t bpaRead; int bpaSlotCur; /* Schwung published stems source */
     float selfPrevL[128], selfPrevR[128];  /* last block's own output, subtracted when recording the master (feedback guard) */
@@ -400,6 +453,8 @@ typedef struct {
     float driftSm[8];                 /* smoothed controls, no stepping */
     float *drL[4], *drR[4]; int drLen[4]; int drW[4];
     double drPh[4]; float drDL[4], drDR[4]; double drInEnv;
+    float drDcXL[4], drDcYL[4], drDcXR[4], drDcYR[4];   /* DC blockers in each Drift feedback line */
+    float selfDcXL, selfDcYL, selfDcXR, selfDcYR;       /* ...and across the Self (own-output) loop */
     int drSilent; float drBleed;   /* abandoned-tail silence bleed */
     Biquad eqLoSh, eqMidPk, eqHiSh; int eqCrush; float eqSat, eqMakeup; double eqCrushHoldL,eqCrushHoldR; int eqCrushCnt;
     double glueEnvL,glueEnvR, tapeLimEnv;
@@ -623,12 +678,38 @@ static inline void dj_filter_stereo(Voice *v, int voicing, double *l, double *r)
 }
 
 /* ---- Studer 962 EQ ---- */
+static void voice_antiimage(Voice *v, int k, double rate, double *outL, double *outR) {
+    double r=fabs(rate);
+    if(r>=0.999){ v->aiCache[k]=-1.0f; return; }        /* unity+ : bypass, stays bit-exact */
+    float q=(float)r;
+    if(fabsf(q-v->aiCache[k])>0.002f){                  /* recompute coeffs only on a real rate change */
+        double cut=r*(SR*0.5)*0.92; if(cut<200.0)cut=200.0;   /* 0.92 = guard band under rate*Nyquist */
+        bq_set_lp(&v->aiLp[k],cut,0.707); v->aiCache[k]=q; }
+    *outL=bq_L(&v->aiLp[k],*outL); *outR=bq_R(&v->aiLp[k],*outR);
+}
+
+/* Studer 961/962 "Faecherentzerrer" (fan equaliser) of the 1.960.221 mono input unit.
+ * Service manual 1.7.2 Frequenzgaenge / D 3/3:
+ *     Tiefenfilter  BASS    20 Hz  +/-15 dB
+ *     Hoehenfilter  TREBLE  20 kHz +/-15 dB
+ *     Praesenzfilter Q = 1, 150 Hz...7 kHz, +/-11 dB
+ * The 20 Hz / 20 kHz figures are MEASUREMENT frequencies - the gain the control reaches at
+ * the edge of the band - NOT shelf corners. Reading them as corners (which this code did)
+ * leaves Bass flat again by ~50 Hz and puts Treble past Nyquist, so both knobs do nothing.
+ * The printed curve family is a fan: every setting crosses 0 dB at a ~1 kHz pivot and then
+ * slopes continuously outward with no plateau in band. Corners and slopes below are a
+ * least-squares fit to those curves, digitised off the manual plot:
+ *     bass   low  shelf  100 Hz, S=0.64  -> 0.43 dB RMS over 20 Hz..1 kHz
+ *     treble high shelf 4750 Hz, S=0.50  -> 0.32 dB RMS over 1 kHz..20 kHz
+ * The bass shelf plateau sits ~6% above its own 20 Hz value, so scale the knob by that to
+ * stay calibrated the way the console specifies it. Same three biquads as before: no
+ * extra state, no extra RAM. */
 static void studer_eq_update(Voice *v) {
-    double bDb=v->eqBass*15.0,tDb=v->eqTreble*15.0,pDb=v->eqPresAmt*11.0;
+    double bDb=v->eqBass*15.0*1.06,tDb=v->eqTreble*15.0,pDb=v->eqPresAmt*11.0;
     double pF=150.0*pow(7000.0/150.0,(double)v->eqPresFreq);
-    if(fabs(bDb)>0.1)bq_set_lowshelf(&v->eqLow,20.0,bDb,0.7);else bq_reset(&v->eqLow);
-    if(fabs(pDb)>0.1)bq_set_peak(&v->eqMid,pF,pDb,0.6);else bq_reset(&v->eqMid);
-    if(fabs(tDb)>0.1)bq_set_highshelf(&v->eqHigh,20000.0,tDb,0.7);else bq_reset(&v->eqHigh);
+    if(fabs(bDb)>0.1)bq_set_lowshelf(&v->eqLow,100.0,bDb,0.64);else bq_reset(&v->eqLow);
+    if(fabs(pDb)>0.1)bq_set_peak(&v->eqMid,pF,pDb,1.0);else bq_reset(&v->eqMid);
+    if(fabs(tDb)>0.1)bq_set_highshelf(&v->eqHigh,4750.0,tDb,0.5);else bq_reset(&v->eqHigh);
 }
 static inline void studer_eq_stereo(Voice *v, double *l, double *r) {
     if(fabs(v->eqBass)>0.007){*l=bq_L(&v->eqLow,*l);*r=bq_R(&v->eqLow,*r);}
@@ -682,7 +763,7 @@ static inline void master_wowflutter_stereo(loopex_t *s, double *l, double *r, d
 /* ---- Voice Clear ---- */
 static inline void voice_clear(Voice *v) {
     if(v->loopLen>0)v->savedLoopLen=v->loopLen;   /* remember for undo (buffer samples are kept) */
-    v->state=VS_EMPTY;v->loopLen=0;v->recHead=0;v->playHead=0;v->playPhase=0.0;
+    v->state=VS_EMPTY;v->loopLen=0;v->recHead=0;v->playHead=0;v->playPhase=0.0;v->dubSamples=0;v->disintGen=0;
     v->glLastSlice=-1;v->stabLpStateL=0.0;v->stabLpStateR=0.0;v->muted=0;
 }
 /* Undo a clear: the buffer was never wiped, so restore length + playback. */
@@ -721,15 +802,21 @@ static inline void master_comp(double *l, double *r, double amt, double *envL, d
 }
 
 /* ---- Punch-in FX engine (master insert) ---- */
-static inline float ring_read(const float *ring, double pos){
+static inline float ring_read(const float *ring, double pos){   /* Hermite: grains and the slice/pitch mechs read this at fractional rates */
     while(pos<0)pos+=PUNCH_BUF; while(pos>=PUNCH_BUF)pos-=PUNCH_BUF;
-    int i0=(int)pos,i1=i0+1; if(i1>=PUNCH_BUF)i1=0; double f=pos-(double)i0;
-    return (float)((double)ring[i0]*(1.0-f)+(double)ring[i1]*f);
+    int i0=(int)pos; double f=pos-(double)i0;
+    int im1=i0-1; if(im1<0)im1+=PUNCH_BUF;
+    int i1=i0+1; if(i1>=PUNCH_BUF)i1-=PUNCH_BUF;
+    int i2=i1+1; if(i2>=PUNCH_BUF)i2-=PUNCH_BUF;
+    return (float)lb_hermite((double)ring[im1],(double)ring[i0],(double)ring[i1],(double)ring[i2],f);
 }
-static inline float buf_read(const float *b, double pos, int n){
+static inline float buf_read(const float *b, double pos, int n){   /* Hermite: the Shimmer/Oct delay-line shifter reads this */
     while(pos<0)pos+=n; while(pos>=n)pos-=n;
-    int i0=(int)pos,i1=i0+1; if(i1>=n)i1=0; double f=pos-(double)i0;
-    return (float)((double)b[i0]*(1.0-f)+(double)b[i1]*f);
+    int i0=(int)pos; double f=pos-(double)i0;
+    int im1=i0-1; if(im1<0)im1+=n;
+    int i1=i0+1; if(i1>=n)i1-=n;
+    int i2=i1+1; if(i2>=n)i2-=n;
+    return (float)lb_hermite((double)b[im1],(double)b[i0],(double)b[i1],(double)b[i2],f);
 }
 #define PRND(r) ((lb_rand(&(r))*0.5)+0.5)   /* 0..1 */
 /* Synced autopan: `ph` is the effect's own cycle phase (0..1), so the image
@@ -780,6 +867,7 @@ static void punch_slot_start(loopex_t *s, PunchSlot *ps, int idx){
         for(int i=0;i<4;i++)ps->gAct[i]=0; ps->gSched=1e12; ps->gIdx=0; ps->gPrime=1; ps->stGrid=(double)ps->w-4000.0;
         memset(ps->shL,0,sizeof ps->shL); memset(ps->shR,0,sizeof ps->shR); ps->shW=0; ps->shR1=0.0; }   /* clear the Stretch doubler ring */   /* gSched primed: no wait before the first grain */
     else if(d->mech==PM_SHIMMER){ ps->shR1=2048.0; ps->shFbL=ps->shFbR=0.0; ps->shW=0; ps->shFill=0;
+        ps->shDcXL=ps->shDcYL=ps->shDcXR=ps->shDcYR=0.0f;
         memset(ps->shL,0,sizeof ps->shL); memset(ps->shR,0,sizeof ps->shR); }   /* stale buffer = burst/click on engage */
 }
 /* Re-tune slice geometry WITHOUT restarting the slot (keeps env + relative phase),
@@ -1031,7 +1119,8 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
         double r=((double)buf_read(ps->shR,rp1,SHBUF)*w1+(double)buf_read(ps->shR,rp2,SHBUF)*w2)/ws;
         ps->shW++; if(ps->shW>=SHBUF)ps->shW=0; if(ps->shFill<SHBUF)ps->shFill++;
         double fl=l,fr=r; if(toneOn){ fl=bq_L(&ps->toneFilt,fl); fr=bq_R(&ps->toneFilt,fr); }
-        ps->shFbL=lb_tanh(fl*regen); ps->shFbR=lb_tanh(fr*regen);   /* each pass climbs another interval: the shimmer */
+        ps->shFbL=lb_dcblock(lb_tanh(fl*regen),&ps->shDcXL,&ps->shDcYL);   /* each pass climbs another interval: the shimmer */
+        ps->shFbR=lb_dcblock(lb_tanh(fr*regen),&ps->shDcXR,&ps->shDcYR);
         punch_doubler(ps,&l,&r);   /* stereo width */
         *outL=l; *outR=r; return; }
     if(d->mech==PM_PITCH){   /* delay-line pitch shift: 2 heads a half-window apart, Hann-crossfaded (click-free) */
@@ -1056,14 +1145,27 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
     else if(d->mech==PM_CHOP)    elT=ps->sliceLen*(press>0.5?0.5:1.0);      /* rhythmic: stays on the grid */
     if(elT<128.0)elT=128.0;
     if(ps->elCur<=0.0)ps->elCur=elT;
-    double pos, gate=1.0, bf=1.0, el=ps->elCur;
+    if(ps->readPhase>=ps->elCur)ps->readPhase=ps->elCur-1.0;   /* guard: the fade below must never see a negative e */
+    if(ps->readPhase<0.0)ps->readPhase=0.0;
+    double pos, pos2=-1.0, xf=0.0, gate=1.0, bf=1.0, el=ps->elCur;
     #define PUNCH_LATCH() do{ ps->elCur=elT; el=elT; if(ps->sliceStartT>=0.0){ ps->sliceStart=ps->sliceStartT; ps->sliceStartT=-1.0; } }while(0)
     if(d->mech==PM_REPEAT){
         pos=ps->sliceStart+ps->readPhase; ps->readPhase+=pm;
         if(ps->readPhase>=el){ ps->readPhase-=el; PUNCH_LATCH(); while(ps->readPhase>=el)ps->readPhase-=el; } }
     else if(d->mech==PM_REVERSE){
-        pos=ps->sliceStart+ps->readPhase; ps->readPhase-=pm;
-        if(ps->readPhase<0){ PUNCH_LATCH(); ps->readPhase+=el; while(ps->readPhase<0)ps->readPhase+=el; if(ps->readPhase>=el)ps->readPhase=el-1.0; } }
+        /* Constant-power loop crossfade. The edge fade below is sequential - it ramps the
+         * slice DOWN to silence at one end and back UP from the other - so every slice edge
+         * carried an ~9 ms hole. Reverse slices are the longest of the four mechs (0.25-1.75
+         * beats), so on sustained material that hole reads as a periodic tick. Instead the
+         * pass hops back by (el - XF) and the tail overlaps the head for XF samples, which
+         * is a real crossfade: the level never dips. */
+        double XF=el*0.25; if(XF>1024.0)XF=1024.0;
+        double hop=el-XF; if(hop<XF){ XF=el*0.5; hop=el-XF; }   /* tiny slices: split it evenly */
+        pos=ps->sliceStart+ps->readPhase;
+        if(ps->readPhase<XF){ pos2=pos+hop; xf=1.0-ps->readPhase/XF; }   /* 0 -> 1 into the incoming head */
+        ps->readPhase-=pm;
+        if(ps->readPhase<0){ ps->readPhase+=hop;   /* hop from the OLD geometry: the fade just handed over at exactly this point */
+            PUNCH_LATCH(); while(ps->readPhase<0)ps->readPhase+=el; if(ps->readPhase>=el)ps->readPhase=el-1.0; } }
     else if(d->mech==PM_GLIDE){      /* each repeat re-pitches: P1 = down/up, pressure = harder glide */
         pos=ps->sliceStart+ps->readPhase; ps->readPhase+=pm*ps->glRate;
         if(ps->readPhase>=el){
@@ -1079,8 +1181,14 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
         double gp=ps->readPhase/el; if(gp>0.85)gate*=(1.0-gp)/0.15;     /* short tail so hits stay separate */ }
     #undef PUNCH_LATCH
     double FD=el*0.25; if(FD>192.0)FD=192.0;                                 /* edge fade: up to ~4 ms */
-    double e=ps->readPhase<el-ps->readPhase?ps->readPhase:el-ps->readPhase; if(e<FD)bf=e/FD;
-    double l=(double)ring_read(ps->ringL,pos)*gate*bf, r=(double)ring_read(ps->ringR,pos)*gate*bf;
+    if(d->mech==PM_REVERSE)FD=0.0;                                           /* superseded by the loop crossfade */
+    double e=ps->readPhase<el-ps->readPhase?ps->readPhase:el-ps->readPhase; if(FD>0.0&&e<FD)bf=e/FD;
+    if(bf<0.0)bf=0.0; else if(bf>1.0)bf=1.0;   /* gain, never a sign flip */
+    double l=(double)ring_read(ps->ringL,pos), r=(double)ring_read(ps->ringR,pos);
+    if(pos2>=0.0){ double ca=cos(xf*0.5*M_PI), sa=sin(xf*0.5*M_PI);          /* equal power across the overlap */
+        l=l*ca+(double)ring_read(ps->ringL,pos2)*sa;
+        r=r*ca+(double)ring_read(ps->ringR,pos2)*sa; }
+    l*=gate*bf; r*=gate*bf;
     double cyc=ps->readPhase/el; if(d->mech==PM_CHOP) cyc=(double)(ps->chopStep&1);   /* chop: alternate L/R per hit */
     punch_autopan(cyc,0.7,&l,&r);
     if(toneOn){ l=bq_L(&ps->toneFilt,l); r=bq_R(&ps->toneFilt,r); }
@@ -1092,9 +1200,7 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
 static inline void vbuf_read(Voice *v,double ph,double *l,double *r){
     int L=__atomic_load_n(&v->loopLen,__ATOMIC_ACQUIRE); if(L<1||!v->bufferL||!v->bufferR){*l=0.0;*r=0.0;return;}
     double q=ph; while(q<0)q+=(double)L; while(q>=(double)L)q-=(double)L;
-    int i0=(int)q%L,i1=(i0+1)%L; double f=q-floor(q);
-    *l=((double)v->bufferL[i0]*(1.0-f)+(double)v->bufferL[i1]*f)/32768.0;
-    *r=((double)v->bufferR[i0]*(1.0-f)+(double)v->bufferR[i1]*f)/32768.0;
+    lb_loop_read(v->bufferL,v->bufferR,L,q,l,r);
 }
 
 /* Move a playhead by d samples click-free: head 0 through the scatter crossfade,
@@ -1110,22 +1216,45 @@ static inline void head_jump(Voice *v, int k, double d){
 static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *outR, double *sendAL, double *sendAR, double *sendBL, double *sendBR) {
     *outL=*outR=*sendAL=*sendAR=*sendBL=*sendBR=0.0;
     int playing=(v->state==VS_PLAYING||v->state==VS_OVERDUBBING);
-    int scrubbing=(v->scrubTimer>0);
+    int scrubbing=(v->scrubTimer>0)||(v->scrubMix>0.0005f);   /* stay alive through the ease-out */
     int LEN=__atomic_load_n(&v->loopLen,__ATOMIC_ACQUIRE);            /* snapshot: the worker may zero it mid-render */
     if((!playing && !scrubbing && v->playEnv<0.0005)||LEN<=0||!v->bufferL||!v->bufferR){ if(!playing)v->playEnv=0.0; return; }
     int effStart=(int)(v->loopStart*(float)LEN); if(effStart<0)effStart=0; if(effStart>LEN-1)effStart=LEN-1;
     int avail=LEN-effStart; if(avail<1)avail=1;                        /* End is loop LENGTH from Start */
     int effLen=(int)(v->loopEnd*(float)avail); if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;
     int effEnd=effStart+effLen;
+    if(v->retrigPend){   /* un-pause = restart from Start. Heads 1-3 run at their own mult and
+                          * diverge permanently, so this is also the only way to re-phase a voice.
+                          * Declick through the existing jump crossfades: ampRel reaches 5 s, so a
+                          * quick pause/un-pause can land here while playEnv is still ringing. */
+        v->retrigPend=0;
+        v->scatXfadePhase=v->playPhase; v->scatXfade=64;
+        v->playPhase=(double)effStart; v->playHead=effStart; v->ph[0].dir=1;
+        for(int k=1;k<4;k++){ Playhead *P=&v->ph[k];
+            P->xfPhase=P->phase; P->xf=64; P->phase=(double)effStart; P->dir=1; }
+        v->glLastSlice=-1;   /* Seed: don't let the slice tracker overwrite our crossfade */
+    }
     double rate=pow(2.0,(double)v->pitch)*s->tapeSpd;if(v->reverse>0.5f)rate=-rate;
     if(s->scanTimer>0)rate*=3.5;   /* Perform: Scan gesture (fast sweep) */
-    if(scrubbing){ rate=v->scrubRate; v->scrubTimer--; }   /* jog rocks the tape, audibly */
     /* head 0 mode/speed */
     { Playhead *P0=&v->ph[0];
       if(P0->spd!=P0->spdCache){ P0->mult=0.25*pow(16.0,(double)P0->spd); P0->spdCache=P0->spd; }
-      if(!scrubbing){ rate*=P0->mult;
-        if(P0->mode==2) rate=-rate;
-        else if(P0->mode==3) rate*=(double)P0->dir; } }
+      rate*=P0->mult;
+      if(P0->mode==2) rate=-rate;
+      else if(P0->mode==3) rate*=(double)P0->dir; }
+    /* Jog scrub: the jog rocks the tape. A detent sets a TARGET rate and the actual rate glides
+     * toward it, so consecutive detents merge instead of stepping. When you stop turning the
+     * scrub eases back into the transport's own rate (or to a standstill on a paused loop)
+     * rather than cutting out. */
+    if(scrubbing){
+        if(v->scrubTimer>0){ v->scrubTimer--; v->scrubMix += (1.0f - v->scrubMix)*0.005f; }
+        else                v->scrubMix += (0.0f - v->scrubMix)*0.0002f;   /* ~110 ms tape-inertia glide back */
+        v->scrubRate += (v->scrubTgt - v->scrubRate)*0.002;                /* ~11 ms between detents */
+        double settle = playing ? rate : 0.0;                              /* where it lands when you let go */
+        double mx=(double)v->scrubMix;
+        rate = settle*(1.0-mx) + v->scrubRate*mx;
+        if(v->scrubTimer<=0 && v->scrubMix<=0.0005f){ v->scrubMix=0.0f; v->scrubRate=0.0; v->scrubTgt=0.0; }
+    }
     double baseRate=rate;
     if(playing && v->scatter>0.01f){ if(--v->scatterCnt<=0){
         int slices=4+(int)(v->scatter*12.0f); int sliceLen=effLen/slices; if(sliceLen<256)sliceLen=256;
@@ -1147,18 +1276,22 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         relPhase=mRel; if(relPhase<0)relPhase=0; if(relPhase>=(double)effLen)relPhase=(double)effLen-1.0;
     }
     double absPhase=(double)effStart+relPhase; v->glPrevAbs=absPhase;
-    int i0=(int)absPhase%LEN;int i1=(i0+1)%LEN;double frac=absPhase-floor(absPhase);
-    double rawL=((double)v->bufferL[i0]*(1.0-frac)+(double)v->bufferL[i1]*frac)/32768.0;
-    double rawR=((double)v->bufferR[i0]*(1.0-frac)+(double)v->bufferR[i1]*frac)/32768.0;
+    double rawL,rawR;
+    { double ap=absPhase; while(ap<0)ap+=(double)LEN; while(ap>=(double)LEN)ap-=(double)LEN;
+      lb_loop_read(v->bufferL,v->bufferR,LEN,ap,&rawL,&rawR); }
     if(v->scatXfade>0){   /* raised-cosine crossfade from the pre-jump position (scatter declick) */
         double op=v->scatXfadePhase; while(op<0)op+=(double)LEN; while(op>=(double)LEN)op-=(double)LEN;
-        int oi0=(int)op%LEN,oi1=(oi0+1)%LEN; double ofr=op-floor(op);
-        double oL=((double)v->bufferL[oi0]*(1.0-ofr)+(double)v->bufferL[oi1]*ofr)/32768.0;
-        double oR=((double)v->bufferR[oi0]*(1.0-ofr)+(double)v->bufferR[oi1]*ofr)/32768.0;
+        double oL,oR; lb_loop_read(v->bufferL,v->bufferR,LEN,op,&oL,&oR);
         double t=0.5-0.5*cos(M_PI*(1.0-(double)v->scatXfade/64.0));
         rawL=oL*(1.0-t)+rawL*t; rawR=oR*(1.0-t)+rawR*t;
         v->scatXfadePhase+=rate; v->scatXfade--; }
-    if(playing||scrubbing){ v->playPhase+=rate;double dEnd=(double)effEnd,dStart=(double)effStart;
+    voice_antiimage(v,0,baseRate,&rawL,&rawR);   /* head 0 reads at baseRate */
+    /* Keep the tape rolling while the release is still open. Pausing only clears `playing`,
+     * so the playhead used to FREEZE the moment you hit pause - the release envelope then
+     * faded out one repeated sample, i.e. DC, which is silent. That made Release (and the
+     * release half of any pause) sound instantaneous no matter where the knob sat. */
+    int moving=playing||scrubbing||(v->playEnv>0.0005);
+    if(moving){ v->playPhase+=rate;double dEnd=(double)effEnd,dStart=(double)effStart;
         if(v->ph[0].mode==3&&!scrubbing){ if(v->playPhase>=dEnd){v->playPhase=dEnd-1.0;v->ph[0].dir=-1;}
             else if(v->playPhase<dStart){v->playPhase=dStart;v->ph[0].dir=1;} }
         else { while(v->playPhase>=dEnd)v->playPhase-=(double)effLen;while(v->playPhase<dStart)v->playPhase+=(double)effLen; }
@@ -1198,8 +1331,9 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         double hl,hr; vbuf_read(v,P->phase,&hl,&hr);
         if(P->xf>0){ double ol,orr; vbuf_read(v,P->xfPhase,&ol,&orr); double w=(double)P->xf/64.0;   /* jump crossfade */
             hl=hl*(1.0-w)+ol*w; hr=hr*(1.0-w)+orr*w;
-            if(playing||scrubbing) P->xfPhase+=baseRate*P->mult*((P->mode==2)?-1.0:(P->mode==3)?(double)P->dir:1.0);
+            if(moving) P->xfPhase+=baseRate*P->mult*((P->mode==2)?-1.0:(P->mode==3)?(double)P->dir:1.0);
             P->xf--; }
+        voice_antiimage(v,k,baseRate*P->mult,&hl,&hr);   /* each head has its own rate */
         double hrel=P->phase-(double)effStart;
         while(hrel<0)hrel+=(double)effLen; while(hrel>=(double)effLen)hrel-=(double)effLen;
         double _rk=fabs(baseRate*P->mult); double _FDk=128.0*(_rk>1.0?_rk:1.0);   /* same rate-scaled fade, per head */
@@ -1210,7 +1344,7 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         double hpl=(hp<=0.0)?1.0:(1.0-hp), hpr=(hp>=0.0)?1.0:(1.0+hp);
         double hg=P->env*hbf*hv;
         rawL+=hl*hg*hpl; rawR+=hr*hg*hpr; envSum+=P->env;
-        if(playing||scrubbing){ double pr=baseRate*P->mult;
+        if(moving){ double pr=baseRate*P->mult;   /* heads 1-3 roll through the release too */
             if(P->mode==2) pr=-pr; else if(P->mode==3) pr*=(double)P->dir;
             P->phase+=pr;
             if(P->mode==3){ if(P->phase>=(double)effEnd){P->phase=(double)effEnd-1.0;P->dir=-1;}
@@ -1268,14 +1402,27 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
 /* ---- Disintegration pass ---- */
 static void voice_disintegrate_pass(Voice *v) {
     if(v->loopLen<=0||!v->bufferL||!v->bufferR)return;
+    /* PROGRESSIVE dissolve. The old pass used a fixed one-pole at k=0.15 — about a 1 kHz
+     * low-pass — slammed onto the whole buffer, so the very FIRST overdub was already as dark
+     * as the effect ever gets. Now the coefficient starts at ~0.85 (a gentle roll-off near
+     * 13 kHz) and falls toward that old 0.15 over roughly six passes, with the saturation,
+     * wow/flutter and level loss ramping in alongside. Each pass also compounds on the last,
+     * so the loop genuinely dissolves step by step instead of in one jump:
+     *   pass 1 ~13 kHz, 2 ~5.4 kHz, 3 ~3.2 kHz, 4 ~2.2 kHz, 5 ~1.7 kHz ... -> ~1.1 kHz */
+    double fade=pow(0.55,(double)v->disintGen);            /* 1.0 on the first pass -> 0 */
+    double stabK=0.15+0.70*fade;
+    double satAmt=(double)v->saturation*0.3*(1.0-0.5*fade);
+    double wfAmt =(double)v->wowFlutter*0.2*(1.0-0.5*fade);
+    double trim  =1.0-0.02*(1.0-fade);                     /* no level loss on the first pass */
     for(int i=0;i<v->loopLen;i++){
         double xL=(double)v->bufferL[i]/32768.0,xR=(double)v->bufferR[i]/32768.0;
-        xL=voice_saturate(xL,(double)v->saturation*0.3);xR=voice_saturate(xR,(double)v->saturation*0.3);
-        voice_wowflutter_stereo(v,&xL,&xR,(double)v->wowFlutter*0.2);
-        double stabK=0.15;v->stabLpStateL+=stabK*(xL-v->stabLpStateL);xL=v->stabLpStateL;
-        v->stabLpStateR+=stabK*(xR-v->stabLpStateR);xR=v->stabLpStateR;xL*=0.98;xR*=0.98;
+        xL=voice_saturate(xL,satAmt);xR=voice_saturate(xR,satAmt);
+        voice_wowflutter_stereo(v,&xL,&xR,wfAmt);
+        v->stabLpStateL+=stabK*(xL-v->stabLpStateL);xL=v->stabLpStateL;
+        v->stabLpStateR+=stabK*(xR-v->stabLpStateR);xR=v->stabLpStateR;xL*=trim;xR*=trim;
         v->bufferL[i]=lb_quant16(lb_clampd(xL,-1.0,1.0),&v->ditRng);   /* dithered: a Disint pass re-quantizes the whole buffer */
         v->bufferR[i]=lb_quant16(lb_clampd(xR,-1.0,1.0),&v->ditRng);}
+    if(v->disintGen<64)v->disintGen++;                     /* next pass goes further */
 }
 
 /* ---- MIDI-keyboard polyphony (plays a loop's buffer pitched, through its FX) ---- */
@@ -1313,9 +1460,10 @@ static inline void poly_sample(loopex_t *s, double *mixL, double *mixR, double *
         int effLen=(int)(lp->loopEnd*(float)avail); if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;
         int effEnd=effStart+effLen;
         while(pv->phase>=(double)effEnd)pv->phase-=(double)effLen; while(pv->phase<(double)effStart)pv->phase+=(double)effLen;
-        int i0=(int)pv->phase%lp->loopLen,i1=(i0+1)%lp->loopLen; double frac=pv->phase-floor(pv->phase);
-        double l=((double)lp->bufferL[i0]*(1.0-frac)+(double)lp->bufferL[i1]*frac)/32768.0;
-        double r=((double)lp->bufferR[i0]*(1.0-frac)+(double)lp->bufferR[i1]*frac)/32768.0;
+        double l,r;
+        { double pq=pv->phase; int PL=lp->loopLen;
+          while(pq<0)pq+=(double)PL; while(pq>=(double)PL)pq-=(double)PL;
+          lb_loop_read(lp->bufferL,lp->bufferR,PL,pq,&l,&r); }
         pv->phase+=pv->rate;
         if(pv->releasing){ pv->env+=(0.0-pv->env)*0.00015; if(pv->env<0.0004){pv->active=0;continue;} }
         else pv->env+=(1.0-pv->env)*0.0045;
@@ -1343,7 +1491,8 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         v->bufferL=(int16_t*)calloc(LOOP_SAMPLES,sizeof(int16_t));
         v->bufferR=(int16_t*)calloc(LOOP_SAMPLES,sizeof(int16_t));
         if(!v->bufferL||!v->bufferR){for(int j=0;j<=i;j++){free(s->voice[j].bufferL);free(s->voice[j].bufferR);}free(s);return NULL;}
-        v->state=VS_EMPTY;v->loopStart=0.0f;v->loopEnd=1.0f;v->reverse=0.0f;
+        v->state=VS_EMPTY;v->loopStart=0.0f;v->loopEnd=1.0f;v->reverse=0.0f;v->retrigPend=0;
+        for(int k=0;k<4;k++){ bq_reset(&v->aiLp[k]); v->aiCache[k]=-1.0f; }
         v->pitch=0.0f;v->filter=0.5f;v->pan=0.0f;v->volume=0.8f;
         v->saturation=0.0f;v->wowFlutter=0.0f;v->send=0.0f;v->glitch=0.0f;
         v->tiltEQ=0.0f;v->decay=1.0f;v->eqBass=0.0f;v->eqPresFreq=0.5f;v->eqPresAmt=0.0f;v->eqTreble=0.0f;
@@ -1382,7 +1531,9 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     for(int i=0;i<DRIFT_N;i++){ s->drLen[i]=DRIFT_LEN[i];
         s->drL[i]=(float*)calloc((size_t)s->drLen[i],sizeof(float));
         s->drR[i]=(float*)calloc((size_t)s->drLen[i],sizeof(float));
-        s->drW[i]=0; s->drPh[i]=0.25*i; s->drDL[i]=0.0f; s->drDR[i]=0.0f; }
+        s->drW[i]=0; s->drPh[i]=0.25*i; s->drDL[i]=0.0f; s->drDR[i]=0.0f;
+        s->drDcXL[i]=s->drDcYL[i]=s->drDcXR[i]=s->drDcYR[i]=0.0f; }
+    s->selfDcXL=s->selfDcYL=s->selfDcXR=s->selfDcYR=0.0f;
     for(int i=0;i<DRIFT_N;i++) if(!s->drL[i]||!s->drR[i]){ for(int j=0;j<DRIFT_N;j++){ free(s->drL[j]); free(s->drR[j]); s->drL[j]=NULL; s->drR[j]=NULL; } break; }   /* partial alloc: disable Drift (guarded by drL[0]) */
     s->drInEnv=0.0; s->drSilent=0; s->drBleed=1.0f;
     s->driftAmt=0.0f; s->driftRate=0.30f; s->driftSize=0.50f; s->driftFb=0.60f;
@@ -1884,6 +2035,8 @@ static inline void drift_sample(loopex_t *s, double *l, double *r){
         double fL=(1.0-b)*yL[i]+b*hL[i], fR=(1.0-b)*yR[i]+b*hR[i];
         s->drDL[i]+= (float)((fL - s->drDL[i])*dco); s->drDR[i]+= (float)((fR - s->drDR[i])*dco);
         fL=s->drDL[i]; fR=s->drDR[i];
+        fL=lb_dcblock(fL,&s->drDcXL[i],&s->drDcYL[i]);   /* blocker INSIDE the loop, before the tanh */
+        fR=lb_dcblock(fR,&s->drDcXR[i],&s->drDcYR[i]);
         double wL=(double)mf_tanh((float)(inL*(double)amt + fL*fbg*sg));
         double wR=(double)mf_tanh((float)(inR*(double)amt + fR*fbg*sg));
         s->drL[i][s->drW[i]]=(float)(wL+1e-25); s->drR[i][s->drW[i]]=(float)(wR+1e-25);
@@ -1928,6 +2081,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     if(g_host&&g_host->mapped_memory){ micBuf=(int16_t*)(g_host->mapped_memory+g_host->audio_in_offset);
         mixBuf=(int16_t*)(g_host->mapped_memory+g_host->audio_out_offset); }
     int useMaster=(s->inSource==1)&&mixBuf;   /* Settings p2: record the Move mix bus instead of line-in */
+    int useSelf=(s->inSource==10);            /* ...or Loopex's own master out (resample / bounce) */
     int laSlot=(s->inSource>=6&&s->inSource<=9)?(s->inSource-6):-1; uint32_t laBase=0; int laOn=0;
     if(laSlot>=0 && s->laShm && s->laShm->magic==LA_IN_MAGIC){
         la_in_slot_t *LS=&s->laShm->slots[laSlot];
@@ -1993,6 +2147,15 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
             uint32_t idx=(laBase+(uint32_t)(n*2))&LA_IN_RING_MASK;
             inL=(double)rg[idx]/32768.0*ig; inR=(double)rg[(idx+1)&LA_IN_RING_MASK]/32768.0*ig;
             double aL=fabs(inL),aR=fabs(inR);if(aL>s->inputPeakL)s->inputPeakL=aL;if(aR>s->inputPeakR)s->inputPeakR=aR; }
+        else if(useSelf){ double ig=(double)s->inputGain;
+            /* Loopex's OWN post-master output, one block (2.9 ms) old: resample the whole mix
+             * - every loop, the punch chain, the sends and the master stage - back into a loop.
+             * Deliberately NO feedback guard here (unlike Master): the regeneration IS the
+             * point. tape_limiter sits at the end of the master chain, so it saturates
+             * rather than diverging. */
+            inL=lb_dcblock((double)s->selfPrevL[n]*ig,&s->selfDcXL,&s->selfDcYL);
+            inR=lb_dcblock((double)s->selfPrevR[n]*ig,&s->selfDcXR,&s->selfDcYR);
+            double aL=fabs(inL),aR=fabs(inR);if(aL>s->inputPeakL)s->inputPeakL=aL;if(aR>s->inputPeakR)s->inputPeakR=aR; }
         else if(useMaster){ double ig=(double)s->inputGain;
             /* Master mix bus minus our own previous-block output, so recording the
              * master captures the other tracks and monitor, not our own loops (no runaway). */
@@ -2024,18 +2187,32 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         for(int vi=0;vi<NUM_VOICES;vi++){Voice *v=&s->voice[vi];
             if(v->state==VS_RECORDING){if(v->recHead<LOOP_SAMPLES){v->bufferL[v->recHead]=inSL;v->bufferR[v->recHead]=inSR;v->recHead++;}
                 if(v->recHead>=LOOP_SAMPLES){v->loopLen=LOOP_SAMPLES;v->playHead=0;v->playPhase=0.0;v->state=VS_PLAYING;}}
-            else if(v->state==VS_OVERDUBBING&&v->playHead<v->loopLen){
+            else if(v->state==VS_OVERDUBBING){ v->dubSamples++;   /* cumulative dub time for the DUB readout */
+              if(v->playHead<v->loopLen){
                 if(s->undoTrack==vi&&s->undoLen==v->loopLen){ int ui=v->playHead;   /* save the original before it is overwritten (once per sample) */
                     if(s->undoGen[ui]!=s->undoCur){ s->undoL[ui]=v->bufferL[ui]; s->undoR[ui]=v->bufferR[ui]; s->undoGen[ui]=s->undoCur; s->undoCount++; } }
+                /* Seam crossfade. The input is continuous but the buffer wraps, so whatever is
+                   playing at the end of a lap abuts whatever was playing at its start -> a click
+                   on every lap once the overdub runs past one loop length. Ramp the incoming
+                   layer across the seam so the overdub loops as cleanly as the original take. */
+                double odg=1.0;
+                { int XF=(int)(SR*0.012); if(XF>v->loopLen/4)XF=v->loopLen/4; if(XF<1)XF=1;
+                  int pos=v->playHead;
+                  if(pos<XF)                   odg=(double)pos/(double)XF;
+                  else if(pos>=v->loopLen-XF)  odg=(double)(v->loopLen-pos)/(double)XF; }
+                double xL=inL*odg,xR=inR*odg;
                 switch(odMode){
-                case OD_REPLACE:v->bufferL[v->playHead]=inSL;v->bufferR[v->playHead]=inSR;break;
+                case OD_REPLACE:{double oL=(double)v->bufferL[v->playHead]/32768.0,oR=(double)v->bufferR[v->playHead]/32768.0;
+                    /* blend rather than overwrite, or the ramp would punch a hole of silence at the seam */
+                    v->bufferL[v->playHead]=lb_quant16(lb_clampd(oL*(1.0-odg)+xL,-1.0,1.0),&v->ditRng);
+                    v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*(1.0-odg)+xR,-1.0,1.0),&v->ditRng);break;}
                 case OD_MULTIPLY:{double oL=(double)v->bufferL[v->playHead]/32768.0,oR=(double)v->bufferR[v->playHead]/32768.0;
                     double dg=0.5+(double)v->decay*0.5;   /* dithered: this mix re-quantizes the whole loop every lap */
-                    v->bufferL[v->playHead]=lb_quant16(lb_clampd(oL*dg+inL,-1.0,1.0),&v->ditRng);
-                    v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*dg+inR,-1.0,1.0),&v->ditRng);break;}
+                    v->bufferL[v->playHead]=lb_quant16(lb_clampd(oL*dg+xL,-1.0,1.0),&v->ditRng);
+                    v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*dg+xR,-1.0,1.0),&v->ditRng);break;}
                 case OD_DISINTEGRATION:{double oL=(double)v->bufferL[v->playHead]/32768.0,oR=(double)v->bufferR[v->playHead]/32768.0;
-                    v->bufferL[v->playHead]=lb_quant16(lb_clampd(oL*0.85+inL,-1.0,1.0),&v->ditRng);
-                    v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*0.85+inR,-1.0,1.0),&v->ditRng);break;}}}}
+                    v->bufferL[v->playHead]=lb_quant16(lb_clampd(oL*0.85+xL,-1.0,1.0),&v->ditRng);
+                    v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*0.85+xR,-1.0,1.0),&v->ditRng);break;}}}}}
 
         double mixL=0.0,mixR=0.0,sAL=0.0,sAR=0.0,sBL=0.0,sBR=0.0;
         for(int vi=0;vi<NUM_VOICES;vi++){double vL,vR,aL,aR,bL,bR;
@@ -2129,7 +2306,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
 static const char *preamp_opts[]={"Tapeless","Clean","Cass1","Cass2","VHS1","VHS2","Reel15","Reel7","Reel3","4trk","Porta","Dub","Warp"};
 #define NUM_PREAMP 13
 static const char *odmode_opts[]={"Replace","Multiply","Disint"};
-static const char *insrc_opts[]={"Line","Master","S1","S2","S3","S4","M1","M2","M3","M4"};
+static const char *insrc_opts[]={"Line","Master","S1","S2","S3","S4","M1","M2","M3","M4","Self"};
 static const char *midiin_opts[]={"Off","Keys","Ctrl"};   /* external MIDI: ignore / keyboard poly / LCXL control */
 static const char *reverse_opts[]={"Normal","Reverse"};
 static const char *stkind_opts[]={"Tumble","Stutter","Reverse","Tape","Gate","Crush"};
@@ -2140,10 +2317,10 @@ static int match_enum(const char *value, const char **opts, int count){for(int i
 static void voice_tap(loopex_t *s, int vi) {
     if(vi<0||vi>=NUM_VOICES)return; Voice *v=&s->voice[vi]; s->selTrack=vi+1;
     switch(v->state){
-    case VS_EMPTY: v->state=VS_RECORDING; v->recHead=0; v->loopLen=0; break;
+    case VS_EMPTY: v->state=VS_RECORDING; v->recHead=0; v->loopLen=0; v->disintGen=0; break;   /* fresh take: Disint starts gentle again */
     case VS_RECORDING: v->loopLen=v->recHead; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING; break;
     case VS_PLAYING: v->state=VS_PAUSED; break;
-    case VS_PAUSED: v->state=VS_PLAYING; break;
+    case VS_PAUSED: v->state=VS_PLAYING; v->retrigPend=1; break;   /* un-pause restarts from Start, not where it froze */
     case VS_OVERDUBBING: if((int)s->overdubMode==OD_DISINTEGRATION)atomic_store(&s->disintReq,vi+1); v->state=VS_PLAYING; break;
     }
 }
@@ -2151,7 +2328,7 @@ static void voice_tap(loopex_t *s, int vi) {
 static void voice_odub(loopex_t *s, int vi) {
     if(vi<0||vi>=NUM_VOICES)return; Voice *v=&s->voice[vi]; s->selTrack=vi+1;
     switch(v->state){
-    case VS_PLAYING: case VS_PAUSED: v->state=VS_OVERDUBBING; v->recHead=v->playHead;
+    case VS_PLAYING: case VS_PAUSED: v->state=VS_OVERDUBBING; v->recHead=v->playHead; v->dubSamples=0;   /* DUB readout counts this pass */
         s->undoCur++; if(!s->undoCur)s->undoCur=1; s->undoTrack=vi; s->undoCount=0; s->undoLen=v->loopLen; break;   /* fresh undo point */
     case VS_OVERDUBBING: if((int)s->overdubMode==OD_DISINTEGRATION)atomic_store(&s->disintReq,vi+1); v->state=VS_PLAYING; break;
     case VS_RECORDING: v->loopLen=v->recHead; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING; break;
@@ -2238,7 +2415,7 @@ static void set_param(void *inst, const char *key, const char *val) {
     SETFR("mClock",mClock,0.0,1.0)
     if(strcmp(key,"mClockMode")==0){ static const char*o[]={"Music","Free"}; int i=match_enum(val,o,2); s->mClockMode=(i>=0)?i:(atof(val)>0.5?1:0); return; }
     if(strcmp(key,"mClockSpot")==0){ static const char*o[]={"Pre","Post"}; int i=match_enum(val,o,2); s->mClockSpot=(i>=0)?i:(atof(val)>0.5?1:0); return; }
-    if(strcmp(key,"inSource")==0){ int i=match_enum(val,insrc_opts,10); s->inSource=(i>=0)?i:(int)lb_clampf((float)atof(val),0,9); return; }
+    if(strcmp(key,"inSource")==0){ int i=match_enum(val,insrc_opts,11); s->inSource=(i>=0)?i:(int)lb_clampf((float)atof(val),0,10); return; }
     SETFR("perfTrem",perfTrem,0.0,1.0) SETFR("perfTremRate",perfTremRate,0.0,1.0) SETFR("punchWidth",punchWidth,0.0,1.0)
     if(strcmp(key,"masterEQ")==0){ int i=match_enum(val,meq_opts,MEQ_N); s->masterEQ=(i>=0)?i:(int)lb_clampf((float)atof(val),0,MEQ_N-1); master_eq_update(s); return; }
     if(strcmp(key,"loopFiltMode")==0){ int i=match_enum(val,mfmode_opts,MF_NVOICE); s->loopFilterMode=(i>=0)?i:(int)lb_clampf((float)atof(val),0,MF_NVOICE-1); return; }
@@ -2321,8 +2498,18 @@ static void set_param(void *inst, const char *key, const char *val) {
         if(v->loopLen<=0)return;
         /* Magneto-style: the jog rocks the tape — the head travels for ~120ms and you hear it. */
         double _sv=atof(val); if(_sv>100.0)_sv=100.0; if(_sv<-100.0)_sv=-100.0;
-        double dist=_sv*(double)v->loopLen*0.01, win=SR*0.12;
-        v->scrubRate=dist/win; v->scrubTimer=(int)win;
+        /* Hybrid step: a fixed 30 ms of audio PLUS 0.2% of the loop. Chosen by ear over a pure
+         * 1%-of-loop step, which ran away on long material (it bottomed out at 3.75x on a 45 s
+         * loop, so slow scrubbing was impossible there). */
+        double step=0.03*SR + (double)v->loopLen*0.002;
+        double dist=_sv*step, win=SR*0.12;
+        double tgt=dist/win;
+        /* Long loop + fast spin could otherwise reach absurd rates; cap near the tape-wind range. */
+        { const double SCRUB_MAX=24.0;
+          if(tgt>SCRUB_MAX)tgt=SCRUB_MAX; else if(tgt<-SCRUB_MAX)tgt=-SCRUB_MAX; }
+        v->scrubTgt=tgt;                  /* the render glides scrubRate toward this, so consecutive
+                                           * detents blend into one continuous move instead of stepping */
+        v->scrubTimer=(int)win;
         return; }
     if(strcmp(key,"headpos")==0){ int si=s->selTrack-1; if(si<0||si>=NUM_VOICES)return; Voice *v=&s->voice[si];
         const char *c=strchr(val,':'); int hi=atoi(val); double d=c?atof(c+1):0.0; if(d>100.0)d=100.0; if(d<-100.0)d=-100.0;
@@ -2582,7 +2769,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
     if(strcmp(key,"masterLoCut")==0)return snprintf(buf,buf_len,"%d",(int)s->masterLoCut);
     if(strcmp(key,"masterHiCut")==0)return snprintf(buf,buf_len,"%d",(int)s->masterHiCut);
     GETP("masterVol",masterVol)
-    GETE("preamp",preamp,preamp_opts,NUM_PREAMP); GETE("overdubMode",overdubMode,odmode_opts,3); GETE("inSource",inSource,insrc_opts,10); GETE("loopFiltMode",loopFilterMode,mfmode_opts,MF_NVOICE);
+    GETE("preamp",preamp,preamp_opts,NUM_PREAMP); GETE("overdubMode",overdubMode,odmode_opts,3); GETE("inSource",inSource,insrc_opts,11); GETE("loopFiltMode",loopFilterMode,mfmode_opts,MF_NVOICE);
     GETP("stability",stability) GETP("globalWowFlut",globalWowFlut) GETP("inputMonitor",inputMonitor) GETP("inputGain",inputGain)
     GETP("inLow",inLow) GETP("inMid",inMid) GETP("inMidFreq",inMidFreq) GETP("inHigh",inHigh) GETP("inHighFreq",inHighFreq)
     GETP("tapeNoise",tapeNoise) GETP("tapeDrive",tapeDrive) GETP("tapeHF",tapeHF)
@@ -2622,7 +2809,14 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
 
     if(strcmp(key,"v_state")==0){static const char *sts[]={"Empty","Rec","Play","Pause","Odub"};
         int st=(int)v->state;if(st<0||st>4)st=0;return snprintf(buf,buf_len,"%s",sts[st]);}
-    if(strcmp(key,"v_loopLen")==0)return snprintf(buf,buf_len,"%.1f",(double)v->loopLen/SR);
+    if(strcmp(key,"v_loopLen")==0)      /* committed loop length (0 until the take is stopped) */
+        return snprintf(buf,buf_len,"%.2f",(double)v->loopLen/SR);
+    if(strcmp(key,"v_takeTime")==0){    /* live counter behind the REC / DUB readout */
+        double sec;
+        if(v->state==VS_RECORDING)        sec=(double)v->recHead/SR;    /* take length so far */
+        else if(v->state==VS_OVERDUBBING) sec=(double)v->dubSamples/SR; /* cumulative dub time, across laps */
+        else                              sec=0.0;
+        return snprintf(buf,buf_len,"%.2f",sec); }
 
     /* State serialization: dump all global + all 16 voices' params */
     if(strcmp(key,"state")==0){int p=0; int trunc=0;

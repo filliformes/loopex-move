@@ -1,6 +1,6 @@
 # Loopex Manual
 
-*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.6*
+*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.0*
 
 This is the full reference. The [README](../README.md) is the short tour.
 
@@ -70,7 +70,7 @@ Press a **step** to select that loop: the screen shows its waveform with the act
 | **P5 HeadMix** | H1 Vol | H1 Pan | H2 Vol | H2 Pan | H3 Vol | H3 Pan | H4 Vol | H4 Pan |
 
 - **Speed** — playback rate, ±2 octaves in 0.1-semitone steps. Pitch and tempo move together, like tape.
-- **Pitch** — an independent pitch shift, −24 to +24 semitones, that leaves the tempo alone. It is a Signalsmith Stretch phase-vocoder shifter; its latency is cancelled by nudging the loop's playheads, so a shifted loop stays in time. At exactly 0 it is fully bypassed.
+- **Pitch** — an independent pitch shift, −24 to +24 semitones, that leaves the tempo alone. It is a Signalsmith Stretch phase-vocoder shifter running on its own worker thread, off the audio callback, so a pitched loop costs the engine almost nothing; its latency (61 ms including the hand-off) is cancelled by nudging the loop's playheads, so a shifted loop stays in time. At exactly 0 it is fully bypassed.
 - **Filter + Reso** — a DJ-style filter: left of centre low-pass, right of centre high-pass, resonance on Reso. Smoothed over 10 ms.
 - **Start / End** — loop window. End is a length from Start.
 - **Sat** — per-loop tape saturation with unity makeup.
@@ -132,9 +132,10 @@ Knobs 5–8 only follow a pad while it is physically held; latched pads keep run
 |---|---|---|---|---|---|---|---|---|---|
 | Track 1 | **Input FX** | Monitor | Tape Style | Input Gain | Low | Mid | Mid Freq | High | High Freq |
 | Track 2 | **Perform** | Stumble Mix | Stumble Step | Stumble Odds | Stumble Size | Stumble Reach | Stumble Kind | Jump | Scan |
+| Track 2 (page 2) | **Perform 2** | Filter Cut | Reso | FChar (filter model) | Clock | ClkMd (Music / Free) | ClkAt (pre / post punch) | Pump | Pump Rate |
 | Track 3 | **Send FX** | A FX | A Amount | A Macro | A Drift | B FX | B Amount | B Macro | B Drift |
 | Track 4 | **Settings** | Arm Threshold | ODub mode | **LpFlt** (loop filter) | Root | In Monitor | **InSrc** (input source) | MIDI In | MIDI Out |
-| Track 4 (page 2) | **Settings 2** | Master Vol | Lo Cut (20–1000 Hz) | Hi Cut | Punch Width | Character | gSat (to 2.0) | Glue | Limit |
+| Track 4 (page 2) | **Output** | Out | LoCut (20–1000 Hz) | HiCut | PWide (punch width) | Char | gSat (to 2.0) | Glue | Limit |
 | Capture | **Input Tape** | Tape Style | Drive | Wow | Flutter | HF | Lo Cut | Hiss | Generations |
 | Sample | **Drift** | Drift | Rate | Size | FBk | Supr | Blur | Damp | Mix |
 | ≡ (Menu) | **Sessions** | Slot | Save | Load | Del | | | | |
@@ -142,8 +143,8 @@ Knobs 5–8 only follow a pad while it is physically held; latched pads keep run
 
 Press the same button again, or **Back**, to close a menu. Enums step once per four detents so a fast turn does not race through the list.
 
-- **Input Tape** — 13 tape styles including a true **Tapeless** bypass (default Clean), drive, wow, flutter, HF rolloff, low cut, hiss and **Generations** (repeated-dub loss). It shapes what gets recorded.
-- **Send FX** — two Palette buses (29 effects: Drive, Sweeten, Fuzz, Howl, Fold, Swell, Doubler, Vibrato, Phaser, Tremolo, Pitch, Shift, Cascade, Reels, Collage, Reverse, Space, Bloom, Filter, Squash, Cassette, Broken, Interference, Halo, Plate, Quartz, Prism, Veil), each with Amount, Macro and Drift. Effect switches happen on the worker; the bus mutes for a few milliseconds while it swaps.
+- **Input Tape** — 13 tape models (`Tapeless · Clean · Cass1 · Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk · Porta · Dub · Warp`, default Clean), drive, wow, flutter, HF rolloff, low cut, hiss and **Generations**. It shapes what gets recorded. Each model's high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ. **VHS1** is the Hi-Fi track — a depth-modulated FM carrier with its companding noise reduction, bright but pumping — and **VHS2** the linear edge track, slow and dark. **Generations** re-applies the selected machine's own loss filter once per pass, so a fourth-generation dub of a Reel3 is darker than one of a Reel15.
+- **Send FX** — two Palette buses (29 effects: Drive, Sweeten, Fuzz, Howl, Fold, Swell, Doubler, Vibrato, Phaser, Tremolo, Pitch, Shift, Cascade, Reels, Collage, Reverse, Space, Bloom, Filter, Squash, Cassette, Broken, Interference, Halo, Plate, Quartz, Prism, Veil), each with Amount, Macro and Drift. Every effect is loudness-matched to the dry signal it replaces, and switching effects **morphs** — the outgoing effect fades out as the incoming one fades in — so sweeping through the list never clicks. (The swap itself happens on the worker.)
 
   The last four are full reverbs, all 100% wet (they sit on a send):
 
@@ -158,7 +159,26 @@ Press the same button again, or **Back**, to close a menu. Enums step once per f
   `abl.dsp.quartz~` and `abl.dsp.prism~`; Veil is Phasma's tank, which is what makes it
   lush rather than metallic. Size changes glide, so turning Amount morphs the room
   tape-style instead of clicking.
-- **Perform** — Stumble (a probabilistic step glitcher), plus **Jump** (crossfaded random jump on every playing loop) and **Scan** (a fast sweep) as buttons.
+- **Perform** — page 1: Stumble (a probabilistic step glitcher), plus **Jump** (crossfaded random jump on every playing loop) and **Scan** (doubles the playback speed while held — exactly one octave up) as buttons. Page 2: the **master Filter** (Cut · Reso · FChar, the twelve Fizzik voicings), the **Master Clock** (a Mood-style pitch/rate warp; ClkMd snaps to intervals or slides free, ClkAt places it before or after the punch bank) and the tempo-synced **Pump** (depth · rate).
+- **Output** (Settings page 2) — the master stage in signal order: Out · LoCut · HiCut · PWide · **Char** · gSat · Glue · Limit. **Char** is thirteen hardware voicings ordered by grit, and it sets more than an EQ curve: each one chooses the converter (bit depth, sample-rate hold, µ-law companding on the MPC), the saturator's curve and asymmetry (first-order anti-aliased, so the grit is the machine's rather than aliasing), the pole count of LoCut/HiCut (2, 3 or 6), how the loops are read (Hermite → linear → drop-sample), and gives **Glue** and **Limit** the attack, release, knee and distortion of the dynamics unit that machine shipped beside.
+
+| Char | Machine | What it sets |
+|---|---|---|
+| **Off** | — | transparent bypass |
+| **962** | Studer 961/962 desk | near-flat, a whisper of transformer; 2-pole filters; no glue colour |
+| **Air** | Focusrite ISA 110 | the air band: +3 dB at 15 kHz, 3-pole filters, clean and open |
+| **SSL** | SSL 4000 bus | tight lows, present mids; 3-pole filters; the bus compressor's fast glue |
+| **Neve** | Neve 1073 + 2254 | warm lows, silky top; 2254 glue with its diode-bridge distortion |
+| **Trident** | Trident A-Range | broad mid lift, 2-pole; the slow, soft A-Range dynamics |
+| **Studer** | Studer A800 tape | 60 Hz head bump, airy top; slow tape glue (30 ms / 600 ms) |
+| **API** | API 550A + 2500 | forward 800 Hz, fast; 2500 glue with THRUST sidechain tilt |
+| **Ampex** | Ampex ATR-102 | fat lows, the heaviest saturation; slowest glue, limiter at −1.7 dB |
+| **MPC** | Akai MPC60 | 40 kHz hold, 12-bit **µ-law** companding, 18 kHz 2-pole reconstruction |
+| **S950** | Akai S950 | 12-bit linear, 25 kHz, **6-pole** 10 kHz reconstruction filter; linear-interpolation reads |
+| **SP12** | E-mu SP-1200 | 26.04 kHz, 12-bit, **no** reconstruction filter; **drop-sample** reads (repeats samples when slowed) |
+| **Emu** | E-mu SP-12 | the same 26.04 kHz clock, darker fixed output (−4.5 dB at 5.5 kHz); drop-sample reads |
+
+  Every figure, its source, and whether it is documented, measured or chosen is recorded in [CHARACTER-RESEARCH.md](CHARACTER-RESEARCH.md).
 - **Drift** (Sample button) — a global drifting-delay memory in the spirit of Soma COSMOS. Four coprime-length delay lines, each read at a slowly drifting tap, feed back through a matrix that morphs from self-feedback to a normalised Hadamard cross-mix. The loop mix feeds it, the memory recirculates, and because the line lengths are coprime and each has its own asynchronous LFO, the recombination never lands on an exact repeat. It sits in the master chain just before the pump, so the ambient layer picks up the character EQ, glue and limiter. Feedback is capped below unity, so the tail always fades (up to a few minutes at maximum), and a **silence bleed** clears an abandoned tail after about eight seconds with no input. Knobs: **Drift** (how much loop mix is fed in) · **Rate** (tap-drift speed) · **Size** (tap length, shimmer to long hall) · **FBk** (memory sustain, below unity fades, near unity holds) · **Supr** (loud new input erases old memory: play over to replace) · **Blur** (self-feedback → full cross-mix) · **Damp** (high-frequency damping of the tail) · **Mix** (wet level into the master). Drift and Mix start at zero, so it is silent until dialled in; it saves with the session.
 - **InSrc** (input source, Settings page 1) — what each new recording samples:
   `Line · Master · S1 · S2 · S3 · S4 · M1 · M2 · M3 · M4 · Self`. **Line** is the line/mic input (default).
@@ -216,17 +236,21 @@ A session holds every setting, the punch pad values, the FX-sequencer pattern an
 ## 8. Signal chain
 
 ```
-Record path: input -> tape style -> drive -> input EQ -> HF rolloff / low cut
-             -> wow + flutter -> generations -> [loop buffer]
+Record path: input -> tape model (13) -> tape drive -> input EQ -> HF loss (head physics)
+             + head bump -> wow + flutter -> generations (the model's loss filter, once per pass)
+             -> [loop buffers]
 
-Per loop:    4 playheads -> Seed re-order -> Scatter -> Pitch (Stretch) -> saturation
-             -> wow/flutter -> DJ filter (+reso) -> tilt EQ -> Studer EQ -> stability
-             -> compressor -> amp envelope -> tape transport gain -> pan/vol -> sends A/B
+Per voice:   4 playheads (Hermite reads + rate-aware anti-imaging; the sampler Characters
+             read linear / drop-sample) -> Seed slice re-order -> Scatter
+             -> Pitch (Signalsmith Stretch, on its own thread) -> saturation -> wow/flutter
+             -> DJ filter (+reso) -> tilt EQ -> Studer 962 EQ -> stability -> compressor
+             -> amp env -> tape transport -> pan/vol -> sends A/B
 
-Master:      sum of loops + MIDI poly -> input monitor -> + Palette send returns
-             -> global saturation -> master wow/flutter -> master compressor
-             -> lo/hi cut -> Stumble -> dropout -> punch FX (5 in series)
-             -> Drift -> master volume -> soft limiter -> output
+Master:      sum of voices + MIDI-poly -> input monitor -> + Palette send returns
+             -> master wow/flutter -> compressor -> Stumble -> [Clock + Filter, pre]
+             -> punch-FX (5 in series) -> [Clock + Filter, post] -> Drift -> pump
+             -> OUTPUT PAGE: gSat -> lo/hi cut -> Character -> Glue -> master out
+             -> tape limiter -> TPDF dither -> output
 ```
 
 ---

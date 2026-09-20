@@ -34,17 +34,21 @@ Airwindows, norns loopers. **Not** a clean digital looper, not a sampler, not (o
 
 ## DSP architecture
 ```
-Record path: input -> preamp/tape model (13) -> tape drive -> input EQ -> HF rolloff / low cut
-             -> wow + flutter -> generations -> [loop buffers]
+Record path: input -> tape model (13) -> tape drive -> input EQ -> HF loss (head physics)
+             + head bump -> wow + flutter -> generations (the model's loss filter, once per pass)
+             -> [loop buffers]
 
-Per voice:   4 playheads -> Seed slice re-order -> Scatter -> Pitch (Signalsmith Stretch)
-             -> saturation -> wow/flutter -> DJ filter (+reso) -> tilt EQ -> Studer 962 EQ
-             -> stability -> compressor -> amp env -> tape transport -> pan/vol -> sends A/B
+Per voice:   4 playheads (Hermite reads + rate-aware anti-imaging; the sampler Characters
+             read linear / drop-sample) -> Seed slice re-order -> Scatter
+             -> Pitch (Signalsmith Stretch, on its own thread) -> saturation -> wow/flutter
+             -> DJ filter (+reso) -> tilt EQ -> Studer 962 EQ -> stability -> compressor
+             -> amp env -> tape transport -> pan/vol -> sends A/B
 
 Master:      sum of voices + MIDI-poly -> input monitor -> + Palette send returns
-             -> global saturation -> master wow/flutter -> compressor -> lo/hi cut
-             -> Stumble -> dropout -> punch-FX (5 in series) -> Drift -> master out
-             -> soft limiter -> output
+             -> master wow/flutter -> compressor -> Stumble -> [Clock + Filter, pre]
+             -> punch-FX (5 in series) -> [Clock + Filter, post] -> Drift -> pump
+             -> OUTPUT PAGE: gSat -> lo/hi cut -> Character -> Glue -> master out
+             -> tape limiter -> TPDF dither -> output
 ```
 Overdub modes: **Replace** / **Multiply** (default, additive with Decay) / **Disintegration**
 (the loop's FX are re-applied each pass, so it dissolves).
@@ -63,14 +67,31 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   crossfade to dry across ±0.08 of centre and **the engine swap is deferred until the wet blend
   reaches ~0** (`djWet`/`djWetTgt`) → pop-free at any sweep speed.
 - **Palette sends** — two buses, `Off` + 24 effects + 4 reverbs (Plate/Quartz/Prism/Veil) =
-  `PFX_COUNT` 29; block-processed, 1-block latency; effect swaps go through the worker.
+  `PFX_COUNT` 29; block-processed, 1-block latency; effect swaps go through the worker and
+  **morph** (outgoing fades as incoming fades in); every effect is level-matched to its dry.
 - **Punch-in FX** — 16 pads, **per-sample, zero-latency, up to 5 in series** over a 2 s ring.
   Stretch/Freeze is a 4-grain wander-wash (randomised lengths + backward wander + per-grain
   stereo, weighted-average sum).
 - **Drift** — 4 coprime delay lines with drifting taps and a Hadamard cross-mix; feedback capped
   below unity, silence bleed after ~8 s.
 - **Sessions** — 64 slots in `/data/UserData/schwung/loopex-sessions/`; **all disk I/O on a
-  `SCHED_OTHER` worker pinned to cores 0-2**, joined in `destroy_instance`.
+  `SCHED_OTHER` worker (`lpx-sio`) pinned to cores 0-2**, joined in `destroy_instance`. The
+  waveform display scan (`wave_compute`) and the Disintegration pass also run there.
+- **Pitch shifters** — Signalsmith Stretch **2048/512** (1024/256 was rejected by ear) on a second
+  worker **`lpx-ps`** (SCHED_OTHER, cores 0-2, `sem_post` per block). Per-voice 16-block queue
+  indexed by the global block number; the callback submits a block and collects the result
+  `PS_D=4` blocks later (`psLat` includes it, the head-nudge compensates). Missing result ⇒
+  keep the last block and ride `psReady` to dry over ~3 ms; `late=` counted in the profile.
+  Each hop costs ~600 µs — on the callback that was a quarter of the slack per pitched loop.
+- **Character** — `MEQ_DEF[13][23]`: `Off · 962 · Air · SSL · Neve · Trident · Studer · API ·
+  Ampex · MPC · S950 · SP12 · Emu` (grit order). Each row sets EQ, saturator (ADAA, clip/asym),
+  converter (bits / crushHz / µ-law compand), reconstruction filter (bwHz), LoCut/HiCut pole
+  count, Glue (atk/rel/knee/dist), Limit ceiling, THRUST and the read-interpolation grit. Sessions
+  store the **name**; legacy numeric indices are remapped. Sources: `docs/CHARACTER-RESEARCH.md`.
+- **Profiler** — `cntvct_el0` probes per stage inside the sample loop; the worker dumps avg/peak
+  µs to `/data/UserData/schwung/loopex-prof.txt` once a second while `loopex-prof.on` exists.
+  The Overtake CPU meter (`get_param("cpu")` = "avg/peak") times **`render_block` only**, and
+  its denominator is the full 2902 µs block, so ~82% is the real danger line.
 - **InSrc (Link Audio)** — `Line · Master · S1-4 · M1-4`. `S1-4` read Schwung's published stems
   from `/schwung-pub-audio` ("BPAL"); `M1-4` read the reconstructed Move tracks from
   `/schwung-link-in` ("LAIN"). Both read-only, with a **private cursor** (never touch `read_pos`).
@@ -85,7 +106,9 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
 - **8 menus** — track buttons 1-4 → Input FX / Perform / Send FX / Settings; Capture → Input
   Tape; ≡ → Sessions; ● → Drift; ✕ → FX Seq. **Perform and Settings are two-page.**
 - **Settings p1** ArmTh · ODub · LpFlt · Root · InMon · InSrc · MIDI · MidiO —
-  **p2** Out · LoCut · HiCut · PWide · Char · gSat · Glue · Limit.
+  **p2 is named "Output"** (`MENU_PAGE_NAMES`): Out · LoCut · HiCut · PWide · Char · gSat · Glue · Limit,
+  in signal order after the punch bank. **Perform p2:** Cut · Reso · FChar · Clock · ClkMd · ClkAt ·
+  Pump · PmpRt. Dropout (`dropAmt`) exists in the DSP but is **not on any page**.
 - Gestures: tap = Empty→Rec→Play⇄Pause; double-tap = Overdub; hold = Clear (Undo restores);
   Shift+tap = speed ½/1/2×; Mute+tap = quick-mute; Copy+pad+pad = clone; Loop+pad = loop length;
   Shift+punch pad = latch; Undo+punch pad = reset that effect.
@@ -145,11 +168,13 @@ JS drives the DSP entirely through `set_param(key,val)` / `get_param(key)`.
 - **Every entry point runs on the SPI audio callback** (`create_instance`, `destroy_instance`,
   `set_param`, `get_param`, `on_midi`, `render_block`). No allocation, file I/O, logging or locks
   on the recurring paths. One-time `calloc`/`mmap` in create; `free`/`munmap`/`pthread_join` in
-  destroy. No mutexes anywhere — lock-free atomics only.
+  destroy. No mutexes anywhere — lock-free atomics only; the one syscall the callback makes is
+  `sem_post` (a non-blocking futex wake) to the shifter worker.
 - **`suspend_keeps_js`: a plain Back only SUSPENDS.** Old JS *and* DSP stay live, so a new build
   silently does nothing. **Full exit = `Shift + Volume + Jog-click`.**
 - **Denormals:** FPCR FZ is **per-thread** on aarch64 and `-ffast-math`'s `crtfastmath` does not
-  set it on the callback thread → `lb_enable_ftz()` runs every block. The build also uses
+  set it on the callback thread → `lb_enable_ftz()` runs every block **and at the start of both
+  workers** (the phase vocoder's bins decay to denormals on a silent loop). The build also uses
   **`-fno-finite-math-only`** so the `x!=x` NaN guards in `lb_clampf/lb_clampd` survive — do not
   remove it.
 - `frames` is clamped to ≤128 at the top of `render_block` **before** any `frames*2` use.
@@ -165,8 +190,8 @@ JS drives the DSP entirely through `set_param(key,val)` / `get_param(key)`.
 - No heap allocation / logging in the render path. No FTZ by default on ARM.
 - Files on the device must be owned by `ableton:users`.
 - **Memory:** ≈127 MB for the 16 stereo loop buffers (16 × 45 s × 2 ch × int16), plus ≈12 MB of
-  shared overdub-undo buffers, ≈3.5 MB of punch rings, ≈1.7 MB of Drift lines — all allocated
-  once in `create_instance`.
+  shared overdub-undo buffers, ≈3.5 MB of punch rings, ≈1.7 MB of Drift lines, ≈0.5 MB of
+  shifter queues — all allocated once in `create_instance`.
 
 ---
 
@@ -188,6 +213,8 @@ overtake-shell/
 README.md                  maintained feature reference + Known limitations + Credits
 docs/MANUAL.md             long-form manual
 docs/index.html            GitHub Pages site (filliformes.github.io/loopex-move)
+docs/CHARACTER-RESEARCH.md every figure behind the 13 Character voicings (DOC / MEASURED / CHOICE tags)
+docs/CHANGELOG.md          release history
 design-spec.md             original design rationale (partly pre-Overtake)
 OVERTAKE-SDK.md            reverse-engineered Overtake SDK reference
 BlackBox 1-8.syx / 9-16    LaunchControl XL templates (set to MIDI channel 2)
@@ -224,4 +251,5 @@ Any user-visible change must land in **all** of these before it's finished:
 4. **`CLAUDE.md`** (this file) — if the architecture, params, surface or constraints moved.
 
 Counts must agree across all four (e.g. **24 Palette effects + 4 reverbs**, **32** Chop patterns,
-**64** session slots, **5** loop pages, **13** tape models). Push the docs with the code.
+**64** session slots, **5** loop pages, **13** tape models, **13** Character voicings). Push the
+docs with the code, and add the release to `docs/CHANGELOG.md`.

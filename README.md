@@ -13,7 +13,7 @@ and a MIDI-keyboard polyphony layer.
 > from the norns looper world (*wrms*, *cranes*, *oooooo*, *samsara*, *nydl*, *otis*).
 
 - **Module:** `loopex` · **Name:** Loopex · **Type:** Overtake (Schwung) · **API v2**
-- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.8.6 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
+- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.0 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
 
 ---
 
@@ -49,8 +49,12 @@ Navigate with **Down** (next) and **Up** (previous).
 | **P5 · HeadMix** | per-head **Vol/Pan** — H1 (mirrors P1 Vol/Pan) · H2 · H3 · H4 |
 
 - **Speed** — playback rate, ±2 octaves in 0.1-semitone steps (pitch and tempo together, like tape).
+  Reads are 4-point Hermite with a rate-aware anti-imaging filter below 0.75×; the sampler
+  Characters replace that with linear or drop-sample reads, which is where their grit comes from.
 - **Pitch** — an independent shift, −24 to +24 semitones, tempo untouched: a Signalsmith Stretch
-  phase-vocoder shifter whose latency is cancelled by nudging the playheads, so the loop stays in time.
+  phase-vocoder shifter. It runs on its own worker thread (`lpx-ps`), off the audio callback, and
+  its latency (61 ms including the hand-off queue) is cancelled by nudging the playheads, so the
+  loop stays in time.
 - **Seed** — a Smack-style *seeded slice re-order* (2/4/8/16 slices, some reversed). The knob
   *is* the seed: every position is a different reproducible mangle, click-free.
 - **Scatter** — stochastic slice jumps, crossfaded.
@@ -73,13 +77,18 @@ The last four are proper reverbs, and the last three come from the standalone in
 | **Prism** | same tank, frequency-dependent decay | decay | lows ring ⇄ highs shimmer | crossover + movement |
 | **Veil** | Householder FDN, modulated diffusers | size + tail | dark → bright | movement + colour |
 
+Every effect is loudness-matched to the dry signal it replaces (the Character family used to sit
+many dB apart), and **switching effects morphs** — the outgoing one fades as the incoming one fades
+in — so sweeping through the list never clicks. The PalFX punch pad behaves the same way.
+
 ### Punch-in FX (right 16 pads)
 Sixteen momentary effects over a 2-second capture ring, in four families —
 **Loops** (1/12 · 1/16 · short · **Chop**, with 32 rhythmic patterns drawn from Signal),
 **Grains** (Haze · Mosaic · Smear · Strum), **Pitch** (Oct− · Oct+ · Glide · Shimmer) and
 **Time** (Stretch · Freeze · Reverse · **PalFX**, one Palette effect as a punch: FX / Amount /
 Macro / Drift, default Space) — **up to 5 stacked in series**. Slice effects auto-pan in
-sync with their rate, and every slot loudness-matches its wet to the dry it replaces.
+sync with their rate, and every slot loudness-matches its wet to the dry it replaces. The grain
+effects draw on a 16-grain pool with voice stealing and window-power normalisation.
 **Oct+, Oct−, Shimmer and Chop are spread to stereo by a microshifter**, the same widener
 Stretch and Freeze use.
 Hold a pad to apply; **knobs 5–8 edit the held effect's four parameters** live, and
@@ -102,9 +111,14 @@ and it winds up to a tone. Release and it eases back to 1×. The glide is linear
 semitones and the last octaves of a stop fade to silence.
 
 ### The Tape machine (record path)
-A full input tape stage on the **Capture** button: **Tape model** (13, including a true
-**Tapeless** bypass) · Drive · Wow · Flutter · HF rolloff · Low cut · Hiss · **Generations**
-(approximates repeated dubs). Default is `Clean`.
+A full input tape stage on the **Capture** button: **Tape model** (13: `Tapeless · Clean · Cass1 ·
+Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk · Porta · Dub · Warp`) · Drive · Wow · Flutter ·
+HF rolloff · Low cut · Hiss · **Generations**. Default is `Clean`. Each model's high-frequency loss
+is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel
+speeds genuinely differ. **VHS1** is the Hi-Fi track — a depth-modulated FM carrier with its
+companding noise reduction, bright but pumping — and **VHS2** the linear edge track, slow and
+dark. **Generations** re-applies the selected machine's own loss filter once per pass, so a
+fourth-generation dub of a Reel3 is darker than one of a Reel15.
 
 ### Drift — a global evolving memory (Sample button)
 A drifting-delay memory station inspired by **Soma COSMOS**, on the **Sample** button. Four
@@ -125,12 +139,15 @@ high feedback sustains without runaway.
 ### Sessions
 **64 numbered slots**, saved and loaded from the **≡ (Menu)** button, each named
 `slot_YYYYMMDD_HHMM`; saving over a used slot asks for confirmation. Settings *and*
-recorded audio are stored; all disk work runs on a `SCHED_OTHER` worker thread pinned to
-cores 0–2, never on the audio callback. Sessions live in
+recorded audio are stored; all disk work runs on a `SCHED_OTHER` worker thread (`lpx-sio`) pinned
+to cores 0–2, never on the audio callback. A second worker, `lpx-ps`, runs the per-loop pitch
+shifters the same way. Sessions live in
 `/data/UserData/schwung/loopex-sessions/` so reinstalls keep them.
 
 ### Perform, MIDI and I/O
-- **Perform menu:** Stumble (probabilistic step glitch), Jump, Scan, Dropout.
+- **Perform menu (two pages):** page 1 — Stumble (probabilistic step glitch), Jump and **Scan**
+  (doubles the speed while held: exactly one octave up); page 2 — the master Filter (Cut · Reso ·
+  FChar), Master Clock (Clock · ClkMd · ClkAt) and the ducking Pump (Pump · PmpRt).
 - **External MIDI (Settings → MIDI):** three modes — **Off** (default) ignores external MIDI;
   **Keys** plays the loops from a MIDI keyboard (8-voice polyphony, each MIDI channel driving a
   loop chromatically through its full FX chain: channel 1 → loop 1, channel 2 → loop 2, … — but
@@ -138,8 +155,35 @@ cores 0–2, never on the audio callback. Sessions live in
   XL control surface (below). Off by default so Move tracks' MIDI-out can't trigger loops.
 - **Settings (two pages):** page 1 is behaviour and I/O — arm threshold, overdub mode, **loop filter**
   (the 12 Master-filter voicings applied to every loop's low-pass), root note, input monitoring,
-  **input source** (see below), MIDI In and MIDI Out. Page 2 is the master — Master Out, master Lo/Hi
-  cut, punch width, character EQ, global sat (to 2.0), glue and tape limiter.
+  **input source** (see below), MIDI In and MIDI Out. Page 2 is **Output**, the master stage in
+  signal order: Out · LoCut · HiCut · PWide · **Char** · gSat · Glue · Limit.
+- **Character** (Output page) is thirteen hardware voicings ordered by grit — `Off · 962 · Air · SSL
+  · Neve · Trident · Studer · API · Ampex · MPC · S950 · SP12 · Emu` — and it sets far more than an
+  EQ curve. Each one chooses the **converter** (bit depth, sample-rate hold, µ-law companding on the
+  MPC), the **saturator**'s curve and asymmetry (first-order ADAA, so the grit is the machine's, not
+  aliasing), the **pole count** of LoCut/HiCut, how the loops are **read** (Hermite → linear →
+  drop-sample), and it gives **Glue** and **Limit** the attack, release, knee and distortion of the
+  dynamics unit that machine shipped beside — the 2254 behind a Neve, the 2500 (with its THRUST
+  sidechain) behind an API, the SSL bus compressor.
+
+| Char | Machine | What it sets |
+|---|---|---|
+| **Off** | — | transparent bypass |
+| **962** | Studer 961/962 desk | near-flat, a whisper of transformer; 2-pole filters; no glue colour |
+| **Air** | Focusrite ISA 110 | the air band: +3 dB at 15 kHz, 3-pole filters, clean and open |
+| **SSL** | SSL 4000 bus | tight lows, present mids; 3-pole filters; the bus compressor's fast glue |
+| **Neve** | Neve 1073 + 2254 | warm lows, silky top; 2254 glue with its diode-bridge distortion |
+| **Trident** | Trident A-Range | broad mid lift, 2-pole; the slow, soft A-Range dynamics |
+| **Studer** | Studer A800 tape | 60 Hz head bump, airy top; slow tape glue (30 ms / 600 ms) |
+| **API** | API 550A + 2500 | forward 800 Hz, fast; 2500 glue with THRUST sidechain tilt |
+| **Ampex** | Ampex ATR-102 | fat lows, the heaviest saturation; slowest glue, limiter at −1.7 dB |
+| **MPC** | Akai MPC60 | 40 kHz hold, 12-bit **µ-law** companding, 18 kHz 2-pole reconstruction |
+| **S950** | Akai S950 | 12-bit linear, 25 kHz, **6-pole** 10 kHz reconstruction filter; linear-interpolation reads |
+| **SP12** | E-mu SP-1200 | 26.04 kHz, 12-bit, **no** reconstruction filter; **drop-sample** reads (repeats samples when slowed) |
+| **Emu** | E-mu SP-12 | the same 26.04 kHz clock, darker fixed output (−4.5 dB at 5.5 kHz); drop-sample reads |
+
+  Every figure, its source and whether it is documented, measured or chosen is in
+  [docs/CHARACTER-RESEARCH.md](docs/CHARACTER-RESEARCH.md).
 - **Record source (Settings p1 → InSrc):** `Line · Master · S1 · S2 · S3 · S4 · M1 · M2 · M3 · M4 · Self`.
   **Line** is the line/mic input (default). **Master** is the Move's whole master mix, minus Loopex's
   own output so it can never feed back. **S1–S4** are Schwung's own four mixer slots and **M1–M4** the
@@ -212,17 +256,21 @@ waveform with labelled **S** and **E** markers at the trim points. Both fall bac
 ## Signal chain
 
 ```
-Record path: input -> preamp/tape model -> tape drive -> input EQ -> HF rolloff / low cut
-             -> wow + flutter -> generations -> [loop buffers]
+Record path: input -> tape model (13) -> tape drive -> input EQ -> HF loss (head physics)
+             + head bump -> wow + flutter -> generations (the model's loss filter, once per pass)
+             -> [loop buffers]
 
-Per voice:   4 playheads -> Seed slice re-order -> Scatter -> Pitch (Stretch) -> saturation
-             -> wow/flutter -> DJ filter (+reso) -> tilt EQ -> Studer 962 EQ -> stability
-             -> compressor -> amp env -> tape transport -> pan/vol -> sends A/B
+Per voice:   4 playheads (Hermite reads + rate-aware anti-imaging; the sampler Characters
+             read linear / drop-sample) -> Seed slice re-order -> Scatter
+             -> Pitch (Signalsmith Stretch, on its own thread) -> saturation -> wow/flutter
+             -> DJ filter (+reso) -> tilt EQ -> Studer 962 EQ -> stability -> compressor
+             -> amp env -> tape transport -> pan/vol -> sends A/B
 
 Master:      sum of voices + MIDI-poly -> input monitor -> + Palette send returns
-             -> global saturation -> master wow/flutter -> compressor -> lo/hi cut
-             -> Stumble -> dropout -> punch-FX (5 in series) -> Drift -> master out
-             -> soft limiter -> output
+             -> master wow/flutter -> compressor -> Stumble -> [Clock + Filter, pre]
+             -> punch-FX (5 in series) -> [Clock + Filter, post] -> Drift -> pump
+             -> OUTPUT PAGE: gSat -> lo/hi cut -> Character -> Glue -> master out
+             -> tape limiter -> TPDF dither -> output
 ```
 
 ---
@@ -257,14 +305,18 @@ otherwise resumes the old code.
 overtake-shell/            <- the active module
   module.json              Overtake manifest (id/name/capabilities)
   src/
-    loopex.c              engine: voices, playheads, punch-FX, stumble, sessions, master
+    loopex.c               engine: voices, playheads, punch-FX, Character, Drift, sessions, master
     palette_fx.c/.h        24-effect Palette engine + Dattorro Plate
     fx_clouds.cc           Clouds-based Space/Bloom (C++)
+    pitch_shift.cc         Signalsmith Stretch wrapper (per-loop Pitch, run on the lpx-ps worker)
     warps_data.c           Warps wavetables (Fold/Shift)
     ui.js                  QuickJS Overtake UI (pads, knobs, screens, LEDs)
   include/plugin_api_v1.h  host API
-  vendor/                  clouds_engine + signalsmith (third-party DSP)
+  vendor/                  clouds_engine + signalsmith + signalsmith-stretch (third-party DSP)
   scripts/                 build.sh, install.sh, Dockerfile
+docs/MANUAL.md             the full manual
+docs/CHARACTER-RESEARCH.md every figure behind the 13 Character voicings, with sources
+docs/CHANGELOG.md          release history
 OVERTAKE-SDK.md            reverse-engineered Overtake SDK reference
 design-spec.md             full design rationale
 ```
@@ -281,6 +333,12 @@ design-spec.md             full design rationale
   host delivery limit, not a module one (`MOVE_MIDI_SOURCE_FX_BROADCAST` is audio-FX-only, so a
   synth-role module can't tap it); lifting it to all 16 needs Schwung's `ext_midi_remap`
   passthrough enabled host-side, after which the existing mapping handles all sixteen unchanged.
+
+---
+
+## Changelog
+
+Release history, with what changed and why: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 ---
 

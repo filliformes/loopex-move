@@ -163,6 +163,8 @@
     <span class="pill"><b>29</b> send effects</span>
     <span class="pill"><b>4</b> reverbs</span>
     <span class="pill"><b>64</b> session slots</span>
+    <span class="pill"><b>13</b> tape models</span>
+    <span class="pill"><b>13</b> character voicings</span>
     <span class="pill">Schwung Overtake</span>
   </div>
   <p class="muted" style="margin-top:18px">Built for the <a href="https://github.com/charlesvestal/schwung">Schwung</a> framework on Ableton Move. Free &amp; open source: <a href="https://github.com/filliformes/loopex-move">source on GitHub</a>.</p>
@@ -187,7 +189,7 @@
     <li><b>Open Loopex</b> from the Overtake / Tools list in Schwung. The left 4×4 pads are your loops; the right 4×4 are punch-in effects.</li>
     <li><b>Record.</b> Tap an empty left pad to start recording, tap again to close the loop and play. It loops instantly.</li>
     <li><b>Layer.</b> Tap other empty pads and record more loops on top. They run independently: no need to match lengths.</li>
-    <li><b>Shape it.</b> Press a <b>step button</b> to select a loop and see its waveform. Turn the eight knobs to sweep Filter, Pitch, Scatter, Seed and more across its four pages (<kbd>Up</kbd>/<kbd>Down</kbd> change page).</li>
+    <li><b>Shape it.</b> Press a <b>step button</b> to select a loop and see its waveform. Turn the eight knobs to sweep Filter, Pitch, Scatter, Seed and more across its five pages (<kbd>Up</kbd>/<kbd>Down</kbd> change page).</li>
     <li><b>Punch an effect.</b> Hold a right pad: Haze, Freeze, Chop: over the whole mix. Press harder for more. <kbd>Shift</kbd>+pad latches it hands-free.</li>
     <li><b>Send to a reverb.</b> On loop page 1, turn <b>Send A</b> up; open <b>Send FX</b> (track button 3) and choose <b>Veil</b> or <b>Space</b>. Then <b>Save</b> it all to a session with the record button.</li>
   </ol>
@@ -249,7 +251,7 @@
   <div class="grid g2" style="margin-top:22px">
     <div class="card k"><h3>Loop pads (left)</h3><p>Tap to record / play / pause — un-pausing restarts the loop from its Start point, re-phasing all four playheads. <b>Undo + pad</b> overdubs. Hold to clear. Colour shows state, tinted by playback speed.</p></div>
     <div class="card k"><h3>Punch pads (right)</h3><p>Hold to apply a momentary effect on the master. Coloured by family. Up to five stack in series; pressure adds intensity.</p></div>
-    <div class="card k"><h3>Steps + arrows</h3><p>A step selects a loop and shows its waveform. <kbd>Up</kbd>/<kbd>Down</kbd> move between its four pages. <kbd>◀ ▶</kbd> are the tape brake / wind.</p></div>
+    <div class="card k"><h3>Steps + arrows</h3><p>A step selects a loop and shows its waveform. <kbd>Up</kbd>/<kbd>Down</kbd> move between its five pages. <kbd>◀ ▶</kbd> are the tape brake / wind.</p></div>
     <div class="card k"><h3>Jog wheel</h3><p>Scrubs the selected loop like tape: audibly, even when paused. On the Playheads page it moves the touched head.</p></div>
   </div>
 </section>
@@ -264,7 +266,7 @@
 <section id="tape">
   <div class="eyebrow">Input</div>
   <h2>What goes onto the tape</h2>
-  <p class="lede">Everything you record passes through the input stage first, so set it before you play. The <b>Input FX</b> menu (track button 1) holds the monitor level, the tape style, input gain and a three-band EQ. The <b>Input Tape</b> page (Capture button) is the machine itself: 13 styles including a true <b>Tapeless</b> bypass, drive, wow, flutter, HF rolloff, low cut, hiss and <b>Generations</b>, the sound of repeated dubbing. Whatever you dial here is printed onto the loop. By default the source is the line/mic input, but <b>InSrc</b> on Settings page 1 can switch it to the <b>Master</b> mix (the whole Move output, minus Loopex's own signal so it never feeds back) or to any single Schwung or Move track in isolation — see the record-source section below.</p>
+  <p class="lede">Everything you record passes through the input stage first, so set it before you play. The <b>Input FX</b> menu (track button 1) holds the monitor level, the tape style, input gain and a three-band EQ. The <b>Input Tape</b> page (Capture button) is the machine itself: 13 styles including a true <b>Tapeless</b> bypass, drive, wow, flutter, HF rolloff, low cut, hiss and <b>Generations</b>, the sound of repeated dubbing. The thirteen models are <b>Tapeless &middot; Clean &middot; Cass1 &middot; Cass2 &middot; VHS1 &middot; VHS2 &middot; Reel15 &middot; Reel7 &middot; Reel3 &middot; 4trk &middot; Porta &middot; Dub &middot; Warp</b>. Each one&rsquo;s high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ; <b>VHS1</b> is the Hi-Fi track (a depth-modulated FM carrier with its companding noise reduction, bright but pumping) and <b>VHS2</b> the linear edge track, slow and dark. Generations re-applies the selected machine&rsquo;s own loss filter once per pass, so a fourth-generation dub of a Reel3 is darker than one of a Reel15. Whatever you dial here is printed onto the loop. By default the source is the line/mic input, but <b>InSrc</b> on Settings page 1 can switch it to the <b>Master</b> mix (the whole Move output, minus Loopex's own signal so it never feeds back) or to any single Schwung or Move track in isolation — see the record-source section below.</p>
 </section>
 
 <section id="loops">
@@ -273,7 +275,7 @@
   <p>Each loop records up to 45 seconds of stereo audio and plays back on its own clock. Three overdub modes shape how layers build: <b>Replace</b>, <b>Multiply</b> (the default; endless decayed layering), and <b>Disintegration</b> (the loop's own effects re-bake each pass, so it slowly falls apart).</p>
   <p>Every loop is read by up to <b>four playheads at once</b>, each with a mode: <b>Off · Fwd · Bwd · Ping · Jump</b>: and its own speed from 0.25× to 4×. <b>Jump</b> leaps to a random position at random intervals, crossfaded. One recording becomes a canon, a drone, or a shifting cloud. Heads sum with equal-power normalisation so stacking never clips, and any head that jumps crossfades.</p>
   <h3 id="pages">The five loop pages</h3>
-  <p class="muted">Select a loop with a step, then <kbd>Up</kbd>/<kbd>Down</kbd> to move between pages. Speed re-pitches like tape (pitch + tempo together); Pitch shifts independently, leaving tempo alone.</p>
+  <p class="muted">Select a loop with a step, then <kbd>Up</kbd>/<kbd>Down</kbd> to move between pages. Speed re-pitches like tape (pitch + tempo together); Pitch shifts independently, leaving tempo alone. Pitch is a Signalsmith Stretch phase vocoder running on its own thread, off the audio engine, its latency cancelled by nudging the playheads so the loop stays in time. Playback reads are 4-point Hermite with rate-aware anti-imaging; the sampler Characters swap that for linear or drop-sample reads.</p>
   <div class="scroll"><table>
     <tr><th>Page</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th></tr>
     <tr><td>P1 · Loop</td><td>Speed</td><td>Filter</td><td>Pan</td><td>Volume</td><td>Start</td><td>End</td><td>Reverse</td><td>Send A</td></tr>
@@ -304,13 +306,13 @@
     <tr><td>Texture</td><td>Filter &middot; Squash &middot; Cassette &middot; Broken &middot; Interference &middot; Halo</td></tr>
     <tr><td>Reverbs</td><td>Plate &middot; Quartz &middot; Prism &middot; Veil</td></tr>
   </table></div>
-  <p class="muted">The buses are 100% wet: the loop's own level stays dry, the send sets how much reaches the effect. The returns join the master before the punch effects, so a punch can grab a reverb tail too.</p>
+  <p class="muted">The buses are 100% wet: the loop's own level stays dry, the send sets how much reaches the effect. The returns join the master before the punch effects, so a punch can grab a reverb tail too. Every effect is loudness-matched to the dry it replaces, and switching effects morphs &mdash; the outgoing one fades as the incoming one fades in &mdash; so sweeping through the list never clicks.</p>
 </section>
 
 <section id="punch">
   <div class="eyebrow">Punch-in FX</div>
   <h2>The right pads: sixteen momentary effects</h2>
-  <p class="lede">Hold a pad to apply an effect to the whole mix, reading a rolling 2-second capture of the master. Up to five stack in series, each with four parameters on knobs 5–8, and pad pressure drives a per-effect expression shown in the footer. Oct+, Oct−, Shimmer and Chop spread to stereo through the same microshifter as Stretch and Freeze.</p>
+  <p class="lede">Hold a pad to apply an effect to the whole mix, reading a rolling 2-second capture of the master. Up to five stack in series, each with four parameters on knobs 5–8, and pad pressure drives a per-effect expression shown in the footer. Oct+, Oct−, Shimmer and Chop spread to stereo through the same microshifter as Stretch and Freeze. The grain effects draw on a 16-grain pool with voice stealing and window-power normalisation.</p>
   <div class="fx-fam">
     <div class="card"><h3><span class="dot" style="background:var(--blue)"></span>Loops</h3><p><b>Loop12 · Loop16 · LoopSh · Chop</b>. Beat-locked stutters. Chop repeats the last transient on one of 32 rhythmic patterns drawn from Signal. Pressure subdivides.</p></div>
     <div class="card"><h3><span class="dot" style="background:var(--pink)"></span>Grains</h3><p><b>Haze · Mosaic · Smear · Strum</b>. Granular clouds: from a shimmering haze to a grid re-sequencer to an arpeggiated cascade. Pressure adds density.</p></div>
@@ -355,28 +357,32 @@
 <section id="perform">
   <div class="eyebrow">Perform &amp; master</div>
   <h2>The master is a performance surface too</h2>
-  <p>The <b>Perform</b> menu (track button 2) has two pages. Page 1 is the Stumble stochastic glitcher plus Jump and Scan. Page 2 is a master processing block:</p>
+  <p>The <b>Perform</b> menu (track button 2) has two pages. Page 1 is the Stumble stochastic glitcher plus Jump and Scan (an exact octave up while held). Page 2 is a master processing block:</p>
   <div class="grid g2">
     <div class="card"><h3>Master filter</h3><p>A low-pass with twelve analog characters ported from Fizzik: Clean, SEM, MS-20, Steiner, four ladders, Prophet, Oberheim, Diode/303, K35, Vintage. Cutoff and resonance are smoothed, so sweeps never step. Self-oscillates on the ladder voicings.</p></div>
     <div class="card"><h3>Master Clock</h3><p>A Chase&nbsp;Bliss Mood-style pitch/rate warp with sample-rate crush. <b>Music</b> mode snaps to wide intervals (octaves, fifths, thirds); <b>Free</b> slides continuously. Place it pre- or post-punch.</p></div>
     <div class="card"><h3>Ducking pump</h3><p>K7–K8: a tempo-synced sidechain pump. It ducks on every beat division and breathes back up: from a gentle swell to a hard rhythmic gate.</p></div>
     <div class="card"><h3>Tape transport</h3><p>The <kbd>◀ ▶</kbd> arrows brake the whole master to a stop or wind it up to a tone, then ease back to speed on release. Fully organic.</p></div>
   </div>
-  <h3>Output character (Settings page 2)</h3>
-  <p>An end-of-chain colour section: a <b>character EQ</b> modelling ten hardware units, a <b>bus glue compressor</b>, and an <b>analog tape limiter</b>.</p>
+  <h3>Output (Settings page 2)</h3>
+  <p>The master stage, in signal order after the punch bank and Drift: <b>Out &middot; LoCut &middot; HiCut &middot; PWide &middot; Char &middot; gSat &middot; Glue &middot; Limit</b>. <b>Char</b> is thirteen hardware voicings ordered by grit, and it sets far more than an EQ curve: each one chooses the <b>converter</b> (bit depth, sample-rate hold, &micro;-law companding on the MPC), the <b>saturator</b>&rsquo;s curve and asymmetry (first-order anti-aliased, so the grit is the machine&rsquo;s rather than aliasing), the <b>pole count</b> of LoCut/HiCut, how the loops are <b>read</b> (Hermite &rarr; linear &rarr; drop-sample), and gives <b>Glue</b> and <b>Limit</b> the attack, release, knee and distortion of the dynamics unit that machine shipped beside &mdash; the 2254 behind a Neve, the 2500 with its THRUST sidechain behind an API, the SSL bus compressor.</p>
   <div class="scroll"><table class="thin">
-    <tr><th>Character</th><th>Voice</th></tr>
-    <tr><td>Studer</td><td>A800 tape: head bump low, airy top, soft saturation</td></tr>
-    <tr><td>Neve</td><td>1073: warm lows, silky high shelf</td></tr>
-    <tr><td>SSL</td><td>bus: tight lows, present mids</td></tr>
-    <tr><td>API</td><td>punchy forward mids, fast</td></tr>
-    <tr><td>SP12</td><td>SP-1200: 12-bit crunch, rolled top</td></tr>
-    <tr><td>MPC</td><td>MPC60: fat, warm 12-bit</td></tr>
-    <tr><td>Emu</td><td>SP-style: dark, gritty converter</td></tr>
-    <tr><td>Ampex</td><td>ATR tape: fat, saturated</td></tr>
-    <tr><td>Air</td><td>Focusrite ISA 110: the air band &mdash; open, extended top</td></tr>
-    <tr><td>Console</td><td>neutral glue colour</td></tr>
+    <tr><th>Char</th><th>Machine</th><th>What it sets</th></tr>
+    <tr><td>Off</td><td>&mdash;</td><td>transparent bypass</td></tr>
+    <tr><td>962</td><td>Studer 961/962 desk</td><td>near-flat, a whisper of transformer; 2-pole filters; no glue colour</td></tr>
+    <tr><td>Air</td><td>Focusrite ISA 110</td><td>the air band: +3&nbsp;dB at 15&nbsp;kHz, 3-pole filters, clean and open</td></tr>
+    <tr><td>SSL</td><td>SSL 4000 bus</td><td>tight lows, present mids; 3-pole filters; the bus compressor&rsquo;s fast glue</td></tr>
+    <tr><td>Neve</td><td>Neve 1073 + 2254</td><td>warm lows, silky top; 2254 glue with its diode-bridge distortion</td></tr>
+    <tr><td>Trident</td><td>Trident A-Range</td><td>broad mid lift, 2-pole; the slow, soft A-Range dynamics</td></tr>
+    <tr><td>Studer</td><td>Studer A800 tape</td><td>60&nbsp;Hz head bump, airy top; slow tape glue (30&nbsp;ms / 600&nbsp;ms)</td></tr>
+    <tr><td>API</td><td>API 550A + 2500</td><td>forward 800&nbsp;Hz, fast; 2500 glue with THRUST sidechain tilt</td></tr>
+    <tr><td>Ampex</td><td>Ampex ATR-102</td><td>fat lows, the heaviest saturation; slowest glue, limiter at &minus;1.7&nbsp;dB</td></tr>
+    <tr><td>MPC</td><td>Akai MPC60</td><td>40&nbsp;kHz hold, 12-bit <b>&micro;-law</b> companding, 18&nbsp;kHz 2-pole reconstruction</td></tr>
+    <tr><td>S950</td><td>Akai S950</td><td>12-bit linear, 25&nbsp;kHz, <b>6-pole</b> 10&nbsp;kHz reconstruction filter; linear-interpolation reads</td></tr>
+    <tr><td>SP12</td><td>E-mu SP-1200</td><td>26.04&nbsp;kHz, 12-bit, <b>no</b> reconstruction filter; <b>drop-sample</b> reads (repeats samples when slowed)</td></tr>
+    <tr><td>Emu</td><td>E-mu SP-12</td><td>the same 26.04&nbsp;kHz clock, darker fixed output (&minus;4.5&nbsp;dB at 5.5&nbsp;kHz); drop-sample reads</td></tr>
   </table></div>
+  <p class="muted">Every figure, its source, and whether it is documented, measured or chosen is in <a href="https://github.com/filliformes/loopex-move/blob/main/docs/CHARACTER-RESEARCH.md">CHARACTER-RESEARCH.md</a>.</p>
   <h3>Loop Filter and record source (Settings page 1)</h3>
   <p><b>Loop Filter</b> gives every loop the same twelve analog voicings as the Master Filter (Clean, SEM, MS-20, Steiner, four ladders, Prophet, Oberheim, Diode, K35, Vintage): the loop Filter knob sweeps and its low-pass takes on the chosen model, resonance from Reso. <b>Input source</b> (<b>InSrc</b>) chooses what each new recording samples: <b>Line</b> (the line/mic input, default), <b>Master</b> (the whole Move mix, minus Loopex’s own output so it never feeds back), <b>S1–S4</b> (Schwung’s four mixer slots) <b>M1–M4</b> (the four OG Move hardware tracks) or <b>Self</b>. <b>Self</b> is Loopex’s own master output, one block old — every loop, the punch chain, both sends and the master stage — so you can resample the whole mix back into a new loop. Unlike <b>Master</b> it has <em>no</em> feedback guard, because the regeneration is the point; the tape limiter at the end of the master chain keeps it saturating rather than running away, and Input Gain is the control. The per-track sources arrive over <b>Ableton Link Audio</b> — the host publishes its slots on <code>/schwung-pub-audio</code> and reconstructs the Move tracks on <code>/schwung-link-in</code>, each as an isolated stereo stem — so a loop can sample any single Schwung or Move track on its own, not just the summed mix (needs the host’s <code>link_audio_publish</code>, on by default).</p>
   <p class="muted">Settings page 1 also holds arm threshold, overdub mode, root note, input monitoring, and MIDI In / MIDI Out; page 2 adds the punch-FX stereo width (mono → wide, per effect).</p>
@@ -408,7 +414,7 @@
 <section id="sessions">
   <div class="eyebrow">Sessions</div>
   <h2>Save the whole rig</h2>
-  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot. Saving over a used slot, or deleting one, asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback. Sessions live under <code>/data/UserData/schwung/loopex-sessions/</code> and survive reinstalls.</p>
+  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot. Saving over a used slot, or deleting one, asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback; a second background thread runs the per-loop pitch shifters. Sessions live under <code>/data/UserData/schwung/loopex-sessions/</code> and survive reinstalls.</p>
 </section>
 
 <section id="cheat">
@@ -449,7 +455,7 @@
 <section id="credits">
   <div class="eyebrow">Credits</div>
   <h2>Standing on open work</h2>
-  <p>Loopex is free and open source under GPL-3.0. It builds on <a href="https://github.com/charlesvestal/schwung">Schwung</a>, Mutable Instruments <a href="https://github.com/pichenettes/eurorack">Clouds &amp; Warps</a>, <a href="https://github.com/Signalsmith-Audio/signalsmith-stretch">Signalsmith Stretch</a>, <a href="https://www.airwindows.com">Airwindows</a>, Jon Dattorro's plate, Charles Vestal's <a href="https://github.com/charlesvestal/schwung-performance-fx">Performance FX</a> (the punch-in pattern), and the sibling instruments <a href="https://github.com/filliformes/punchfx-move">Punchfx</a> (the punch bank), <a href="https://github.com/filliformes/fizzik-move">Fizzik</a> (the 12 filter voicings), Res, Essaim, Phasma, Palette, Magnéto and Signal. Full list in the <a href="https://github.com/filliformes/loopex-move#credits">repository</a>.</p>
+  <p>Loopex is free and open source under GPL-3.0. It builds on <a href="https://github.com/charlesvestal/schwung">Schwung</a>, Mutable Instruments <a href="https://github.com/pichenettes/eurorack">Clouds &amp; Warps</a>, <a href="https://github.com/Signalsmith-Audio/signalsmith-stretch">Signalsmith Stretch</a>, <a href="https://www.airwindows.com">Airwindows</a>, Jon Dattorro's plate, Charles Vestal's <a href="https://github.com/charlesvestal/schwung-performance-fx">Performance FX</a> (the punch-in pattern), and the sibling instruments <a href="https://github.com/filliformes/punchfx-move">Punchfx</a> (the punch bank), <a href="https://github.com/filliformes/fizzik-move">Fizzik</a> (the 12 filter voicings), Res, Essaim, Phasma, Palette, Magnéto and Signal. The thirteen Character voicings are built from manufacturer documentation and measurements, recorded in <a href="https://github.com/filliformes/loopex-move/blob/main/docs/CHARACTER-RESEARCH.md">CHARACTER-RESEARCH.md</a>. Full list in the <a href="https://github.com/filliformes/loopex-move#credits">repository</a>.</p>
   <footer>Loopex: a dream ambient &amp; experimental looper for Ableton Move. Made by filliformes. · <a href="https://github.com/filliformes/loopex-move">GitHub</a></footer>
 </section>
 

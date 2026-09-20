@@ -343,6 +343,8 @@ license (see `overtake-shell/vendor/` and the file headers); the rest is inspira
 - **Chase Bliss Blooper, Mood MK2, Generation Loss MK2** — Stability, the old Clock's
   degradation, Disintegration overdub, Generations. https://www.chasebliss.com
 - **Hologram Microcosm** — the grain and glide punch families. https://hologramelectronics.com/microcosm
+- **Character voicings** — every figure behind the thirteen Char models, with sources and an
+  explicit mark on what is documented versus chosen: [docs/CHARACTER-RESEARCH.md](docs/CHARACTER-RESEARCH.md).
 - **Studer 961/962** — the per-loop channel EQ, modelled on the console's *Fächerentzerrer* (fan
   equaliser) in the 1.960.221 input unit. Bass and Treble corners and slopes are a least-squares
   fit to the response curves printed in the service manual (§1.7.2 / D 3/3), digitised off the

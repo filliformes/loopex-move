@@ -246,6 +246,13 @@ static inline double tape_sat(double x) {
 /* Per-model playhead-loss one-pole, derived in the comment on apply_preamp_sample below.
  * Indexed by preamp model. 1.0 = no loss (Tapeless / Clean / Warp). Shared with
  * input_generations, which applies the SAME filter once per dubbing pass. */
+/* Speed-scaled LF head bump. Endino's measured A80/A827 curves show the ripple shifts one
+ * OCTAVE per speed doubling, so the reel speeds differ in the bass as well as the top. That
+ * matters because 18 kHz vs 12 kHz sits above most programme material - on speech the three
+ * reels were nearly indistinguishable. Reels only: nobody has published a cassette bump and
+ * guessing one would be inventing character. */
+static const double TAPE_BUMP_HZ[13]={0,0,0,0,0,0, 60.0,30.0,15.0, 0,0,0,0};
+static const double TAPE_BUMP_DB[13]={0,0,0,0,0,0,  2.4, 2.0, 1.6, 0,0,0,0};
 static const double TAPE_LOSS_K[13] = {
     1.0,   /* 0 Tapeless */  1.0,   /* 1 Clean  */  0.296, /* 2 Cass1  */  0.225, /* 3 Cass2 */
     0.923, /* 4 VHS1 HiFi*/  0.575, /* 5 VHS2 lin*/  0.923, /* 6 Reel15 */  0.823, /* 7 Reel7 */
@@ -280,12 +287,21 @@ static inline void apply_preamp_sample(double *l, double *r, int model, double *
      * speed - so it is genuinely 20 Hz-20 kHz and must NOT be rolled off. Its character is
      * the noise reduction: IEC 60774-2 s5.1 specifies peak detection, 2:1 logarithmic
      * compression, 3-10 ms attack, 70 ms recovery. That compander pumping is the sound. */
-    case 4:{ double d=fmax(fabs(*l),fabs(*r));
-        double a=(d>*cmpL)?0.0032:0.00032;            /* ~5 ms attack / 70 ms recovery */
-        *cmpL+=(d-*cmpL)*a; double e=*cmpL;
-        double gc=(e>0.0016)? pow(e/0.0016,-0.5) : 1.0;   /* 2:1 in the log domain */
-        if(gc>4.0)gc=4.0;
-        *l=lb_tanh(*l*gc*1.05)/1.0+noise*0.08; *r=lb_tanh(*r*gc*1.05)+noise*0.08;
+    case 4:{ /* record-side compression then playback expansion. A compander is UNITY in
+             * steady state - its artefacts come from the two envelopes not tracking each
+             * other. Applying only the compressor (as this first did) buried the signal by
+             * 28 dB at full scale. Ref level 0.1 = -20 dBFS. */
+        const double REF=0.1;
+        double d=fmax(fabs(*l),fabs(*r));
+        *cmpL += (d-*cmpL)*((d>*cmpL)?0.0032:0.00032);        /* 7 ms / 71 ms, per IEC */
+        double ec=fmax(*cmpL,1e-6), gc=pow(ec/REF,-0.5);      /* 2:1 compress */
+        if(gc>8.0)gc=8.0;
+        double cl=*l*gc, cr=*r*gc;
+        double dc=fmax(fabs(cl),fabs(cr));
+        *cmpR += (dc-*cmpR)*((dc>*cmpR)?0.0026:0.00043);      /* deliberately mismatched */
+        double ee=fmax(*cmpR,1e-6), ge=pow(ee/REF,1.0);       /* 1:2 expand back */
+        if(ge>4.0)ge=4.0; else if(ge<0.25)ge=0.25;
+        *l=cl*ge+noise*0.06; *r=cr*ge+noise*0.06;
         double k=TAPE_LOSS_K[4];
         *casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
     /* VHS2 = the LINEAR (longitudinal) track: stationary head at 33.35 mm/s, documented
@@ -554,7 +570,7 @@ typedef struct {
     int midiOut, midiOutPrev;              /* mirror loop state to a LaunchControl XL's LEDs */
     uint8_t ledFocusCache[16], ledMuteCache[16];
     float armThresh;         /* threshold-armed record level (0..1) */
-    Biquad inEqLo,inEqMid,inEqHi,inTapeLp,inTapeHp;
+    Biquad inEqLo,inEqMid,inEqHi,inTapeLp,inTapeHp,inBump; float bumpCache;
     double iFlutBufL[FLUTTER_BUF],iFlutBufR[FLUTTER_BUF]; int iFlutWr; double iFlutPhW,iFlutPhF;
     double genLpL[4],genLpR[4]; double vhsCmpL,vhsCmpR;
     /* Session save/load — all disk work happens on a SCHED_OTHER worker (cores 0-2),
@@ -1694,6 +1710,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     for(int i=0;i<NUM_PUNCH;i++){s->punchParams[i][0]=0.5f;s->punchParams[i][1]=0.5f;s->punchParams[i][2]=1.0f;s->punchParams[i][3]=1.0f;s->punchPress[i]=0.0f;}
     s->inLow=0.0f;s->inMid=0.0f;s->inMidFreq=0.5f;s->inHigh=0.0f;s->inHighFreq=0.5f;
     bq_reset(&s->inEqLo);bq_reset(&s->inEqMid);bq_reset(&s->inEqHi);bq_reset(&s->inTapeLp);bq_reset(&s->inTapeHp);
+    bq_reset(&s->inBump); s->bumpCache=-1.0f;
     s->busA=pfx_create(44100.0f); s->busB=pfx_create(44100.0f); s->punchFx=pfx_create(44100.0f);
     if(s->punchFx)pfx_select(s->punchFx,28);   /* Veil */
     for(int i=0;i<3;i++){ atomic_store(&s->fxSel[i],-1); atomic_store(&s->fxBusy[i],0); }
@@ -2534,6 +2551,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         if(preModel>0&&s->tapeDrive>0.001f){ inL*=tdG; inR*=tdG; }
         apply_preamp_sample(&inL,&inR,preModel,&s->casLpL,&s->casLpR,&s->vhsCmpL,&s->vhsCmpR,&s->rng,(double)s->tapeNoise);
         if(preModel>0&&s->tapeDrive>0.001f){ inL/=tdG; inR/=tdG; }
+        if(preModel>0&&TAPE_BUMP_DB[preModel]>0.05){ inL=bq_L(&s->inBump,inL); inR=bq_R(&s->inBump,inR); }
         if(preModel>0&&s->tapeHF<0.99f){ inL=bq_L(&s->inTapeLp,inL); inR=bq_R(&s->inTapeLp,inR); }
         if(preModel>0&&s->tapeLoCut>0.01f){ inL=bq_L(&s->inTapeHp,inL); inR=bq_R(&s->inTapeHp,inR); }
         if(preModel>0) input_wowflutter(s,&inL,&inR,(double)s->tapeWow,(double)s->tapeFlut);

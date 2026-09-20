@@ -297,7 +297,7 @@ typedef struct {
     Biquad eqLow, eqMid, eqHigh, tiltLo, tiltHi;
     double flutBufL[FLUTTER_BUF], flutBufR[FLUTTER_BUF];
     int flutWr; double flutSweep, flutNextMax;
-    int glN, glOrder[16], glRev[16], glLastSlice; double glPrevAbs; float glKnobCache;  /* Seed slice-reorder */
+    int glN, glOrder[16], glRev[16], glLastSlice, glRegenPend; double glPrevAbs; float glKnobCache;  /* Seed slice-reorder */
     double playPhase, stabLpStateL, stabLpStateR;
     uint32_t rng;
     uint32_t ditRng;                      /* dither RNG for the int16 buffer writes — kept separate from
@@ -1344,7 +1344,14 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         if((lb_rand(&v->rng)*0.5+0.5)<(double)v->scatter){ int sl=(int)((lb_rand(&v->rng)*0.5+0.5)*(double)slices); if(sl>=slices)sl=slices-1;
             v->scatXfadePhase=v->playPhase; v->scatXfade=64;   /* crossfade out of the old position */
             v->playPhase=(double)(effStart+sl*sliceLen); } } }
-    int glOn=(v->glitch>=0.02f); if(glOn && v->glitch!=v->glKnobCache) glitch_regen(v);
+    /* Seed: a knob move used to rewrite glOrder/glRev IMMEDIATELY, which re-mapped the slice
+     * that was mid-playback - the read position jumped and it clicked on every new seed.
+     * glitch_regen also cleared glLastSlice, which then suppressed the very crossfade that
+     * would have covered it. Defer the regen to the next slice boundary instead, where the
+     * existing 64-sample crossfade already sits, so the pattern morphs rather than snaps. */
+    int glOn=(v->glitch>=0.02f);
+    if(glOn && v->glitch!=v->glKnobCache){ v->glKnobCache=v->glitch; v->glRegenPend=1; }
+    if(glOn && v->glN<=0){ glitch_regen(v); v->glRegenPend=0; }   /* first engage: nothing to morph from */
     double relPhase=v->playPhase-(double)effStart;
     while(relPhase<0)relPhase+=(double)effLen;while(relPhase>=(double)effLen)relPhase-=(double)effLen;
     double boundRel=relPhase;   /* linear phase for the loop-boundary fade (pre-remap) */
@@ -1354,7 +1361,16 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         if(slice<0)slice=0; if(slice>=gN)slice=gN-1;
         double within=relPhase-(double)slice*sl; int mapped=v->glOrder[slice]%gN;
         double mRel=v->glRev[slice]?((double)mapped*sl+(sl-1.0-within)):((double)mapped*sl+within);
-        if(slice!=v->glLastSlice){ if(v->glLastSlice>=0){v->scatXfadePhase=v->glPrevAbs;v->scatXfade=64;} v->glLastSlice=slice; }
+        if(slice!=v->glLastSlice){
+            if(v->glLastSlice>=0){ v->scatXfadePhase=v->glPrevAbs; v->scatXfade=64; }
+            if(v->glRegenPend){   /* swap the pattern here, under cover of that crossfade */
+                int keep=v->glLastSlice; glitch_regen(v); v->glLastSlice=keep; v->glRegenPend=0;
+                gN=v->glN; while(gN>2 && effLen/gN<128) gN>>=1;
+                sl=(double)effLen/(double)gN; slice=(int)(relPhase/sl);
+                if(slice<0)slice=0; if(slice>=gN)slice=gN-1;
+                within=relPhase-(double)slice*sl; mapped=v->glOrder[slice]%gN;
+                mRel=v->glRev[slice]?((double)mapped*sl+(sl-1.0-within)):((double)mapped*sl+within); }
+            v->glLastSlice=slice; }
         relPhase=mRel; if(relPhase<0)relPhase=0; if(relPhase>=(double)effLen)relPhase=(double)effLen-1.0;
     }
     double absPhase=(double)effStart+relPhase; v->glPrevAbs=absPhase;
@@ -1977,8 +1993,11 @@ static const char *meq_opts[MEQ_N] = { "Off","962","Air","SSL","Neve","Trident",
  *       use, and because it is exhaustively documented. Attack 3 ms and release 200 ms are
  *       real switch positions. glueDist is 0.00 and that is a FINDING, not laziness: no
  *       independent THD-under-gain-reduction measurement of a 2500 exists anywhere, and a
- *       THAT-2180 VCA bus compressor is supposed to stay clean, so inventing grit for it
- *       would be fiction. Knee width in dB is unpublished by API - 6 dB is a choice.
+ *       2500-as-built THD under GR is unmeasured, but the THAT 2180 VCA inside it has a
+ *       plotted datasheet FFT: 2nd harmonic -80.1 dB, 3rd -104 dB, and THD rising 3-4x
+ *       once the VCA pulls gain. So API gets a SMALL, EVEN-order grit (-0.05) against
+ *       the Neve's larger odd-order 0.35 - component-level data, not whole-unit, and
+ *       the 2510/2520 and output transformer remain undocumented. Knee width: a choice.
  * thrust: API's patented THRUST sidechain filter (US 5,170,437), the one mechanism nothing
  *       else here has. It tilts the signal feeding the DETECTOR - not the audio - by
  *       +10 dB/decade, -15 dB at 20 Hz to +15 dB at 20 kHz, pivoting near 632 Hz. Bass
@@ -2049,7 +2068,7 @@ static const double MEQ_DEF[MEQ_N][23] = {
 
     {  60, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00,     0,0,0.10,0,0,2,30,600,10,0.00,0.85,0.00 },   /* Studer A800 — head bump ~60 Hz (measured siblings); Studer specs 3rd harmonic */
 
-    { 100, 1.0,  800, 2.5,1.1,  7000, 1.0, 0.20,     0, -1.6 , 0.00,     0,0,0.10,0,0,2,    3,200, 6,0.00,0.96,1.00 },   /* API 550A — 100/800/7k documented; dynamics from the 2500 bus comp (see note) */
+    { 100, 1.0,  800, 2.5,1.1,  7000, 1.0, 0.20,     0, -1.6 , 0.00,     0,0,0.10,0,0,2,    3,200, 6,-0.05,0.96,1.00 },   /* API 550A — 100/800/7k documented; dynamics from the 2500 bus comp (see note) */
 
     {  70, 2.0,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00,     0,0,0.12,0,0,2,35,700,12,0.00,0.82,0.00 },   /* Ampex ATR-102 — LF within its documented +/-2 dB bound; even-order is 1/3 of 3rd */
 
@@ -2184,9 +2203,18 @@ static inline void master_glue(loopex_t *s, double *l, double *r){
      * 0.2% compressing, 0.45% limiting - distortion that rises WITH gain reduction. Nobody
      * else here publishes a figure under GR, so only the diode-bridge and FET rows carry
      * this; the VCA voicings stay clean, which is what a VCA does. */
-    if(s->glueDist>0.001 && grDb>0.05){
-        double d=s->glueDist*(grDb/10.0); if(d>s->glueDist)d=s->glueDist;
-        *l+=(lb_tanh(*l*1.6)*0.92-*l)*d; *r+=(lb_tanh(*r*1.6)*0.92-*r)*d; }
+    if(fabs(s->glueDist)>0.001 && grDb>0.05){
+        /* SIGN carries harmonic order, magnitude carries amount.
+         *   +  odd  - symmetric curve. Neve 33609 diode bridge, Trident FET.
+         *   -  even - biased curve. The THAT 2180 VCA in the API 2500 measures
+         *      2nd at -80.1 dB against 3rd at -104 dB (datasheet FFT, Fig 13),
+         *      and its THD triples to quadruples once the VCA pulls gain. */
+        double gd=fabs(s->glueDist), d=gd*(grDb/10.0); if(d>gd)d=gd;
+        double b=(s->glueDist<0.0)?0.18:0.0, t0=lb_tanh(b);
+        *l+=((lb_tanh(*l*1.6+b)-t0)*0.92-*l)*d;
+        *r+=((lb_tanh(*r*1.6+b)-t0)*0.92-*r)*d; }
+
+
 
 }
 

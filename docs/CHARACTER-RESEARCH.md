@@ -148,9 +148,18 @@ Distinct from the 962 desk. Different machine, different character.
 - Max output +32 dB, response ±0.5 dB 20 Hz–50 kHz, S/N 120 dB, clips +28 dBu — **DOC**
 - **Knee width in dB: GAP.** API's HARD/MED/SOFT plot has no scale on either axis and
   nobody has measured it. Ours is a **CHOICE**.
-- **THD under gain reduction: GAP.** No measurement exists publicly, anywhere. A THAT-2180
-  VCA bus compressor is meant to stay clean, so `glueDist = 0.00` is a **finding**, not an
-  omission.
+- **THD under gain reduction of the 2500 as built: GAP.** No measurement exists publicly.
+  But the **THAT 2180 VCA** inside it (four per channel, per SOS's inspection) publishes
+  plots — **DOC**, component-level, not whole-unit:
+  - **0.005–0.010 % at unity gain → 0.020–0.030 % at ±15 dB gain.** Distortion triples to
+    quadruples once the VCA actually pulls gain.
+  - Datasheet FFT (Fig. 13): **2nd harmonic −80.1 dB, 3rd −104 dB** — strongly **even-order**
+    dominated, third some 24 dB below.
+  - Second mechanism THAT document: **2252 ripple modulating the VCA**, worst at low
+    frequencies under heavy GR. Their alignment nulls it at 100 Hz / ~20 dB compression.
+  So API carries a **small even-order** grit (−0.05) against the Neve's larger **odd-order**
+  0.35. In `MEQ_DEF` the **sign of `glueDist` carries harmonic order**, the magnitude carries
+  amount. The 2510/2520 op-amps and the output transformer remain **GAP**.
 - **Caveat on the pairing itself:** 550A is 1967, 2500 is 2000s. This is matched by
   *function* — the API bus compressor people actually use — not by era, unlike
   Neve→33609 or ISA 110→ISA 130 which are genuine contemporaries.

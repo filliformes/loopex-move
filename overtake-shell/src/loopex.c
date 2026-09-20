@@ -716,6 +716,7 @@ static void prof_dump(loopex_t *s){
     for(int i=0;i<PROF_N;i++){ fprintf(f,"%-12s %8.1f %8.1f\n",PROF_NAME[i],s->profAvg[i],s->profPk[i]); ta+=s->profAvg[i]; tp+=s->profPk[i]; s->profPk[i]=0.0; }
     fprintf(f,"%-12s %8.1f %8.1f\n","TOTAL",ta,tp);
     fprintf(f,"meter %.0f%% avg / %.0f%% peak\n",s->cpuPct,s->cpuPeak);
+    fprintf(f,"state: driftMix=%.3f driftAmt=%.3f mClock=%.3f mClockSpot=%d mfCut=%.3f mfReso=%.3f stMix=%.3f dropAmt=%.3f globalWowFlut=%.3f masterComp=%.3f perfTrem=%.3f masterLoCut=%.0f masterHiCut=%.0f masterEQ=%d masterGlue=%.3f tapeLimit=%.3f globalSat=%.3f tapeGen=%.3f punchWidth=%.3f\n",(double)s->driftMix,(double)s->driftAmt,(double)s->mClock,(int)s->mClockSpot,(double)s->mfCut,(double)s->mfReso,(double)s->stMix,(double)s->dropAmt,(double)s->globalWowFlut,(double)s->masterComp,(double)s->perfTrem,(double)s->masterLoCut,(double)s->masterHiCut,(int)s->masterEQ,(double)s->masterGlue,(double)s->tapeLimit,(double)s->globalSat,(double)s->tapeGen,(double)s->punchWidth);
     for(int i=0;i<NUM_VOICES;i++){ Voice *v=&s->voice[i]; if(v->psActive)
         fprintf(f,"shifter ACTIVE on loop %d: Pit=%.4f (%.2f st) mix=%.3f warm=%d/%d late=%ld\n",i+1,v->clock,v->clock*12.0f,v->psMix,v->psWarm,v->psLat,v->psLateCount); }
     fclose(f);
@@ -1922,6 +1923,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         pthread_setschedparam(s->sio.th,SCHED_OTHER,&sp);
         cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(0,&cs); CPU_SET(1,&cs); CPU_SET(2,&cs);
         pthread_setaffinity_np(s->sio.th,sizeof(cs),&cs);
+        pthread_setname_np(s->sio.th,"lpx-sio");   /* visible as the thread comm under /proc (world-readable, unlike maps) */
         atomic_store(&s->sio.request,4);   /* populate the slot-name cache off the callback */
     }
     /* Pitch-shifter worker: same discipline (SCHED_OTHER, cores 0-2), woken per block by sem_post. */
@@ -1932,6 +1934,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         pthread_setschedparam(s->psTh,SCHED_OTHER,&sp2);
         cpu_set_t cs2; CPU_ZERO(&cs2); CPU_SET(0,&cs2); CPU_SET(1,&cs2); CPU_SET(2,&cs2);
         pthread_setaffinity_np(s->psTh,sizeof(cs2),&cs2);
+        pthread_setname_np(s->psTh,"lpx-ps");
     }
     /* Overtake: no sample browser (file I/O forbidden on the audio callback; live
      * looping records from the input). Browser stays empty and harmless. */

@@ -2396,11 +2396,8 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         mixR += (double)s->sretAR[n] + (double)s->sretBR[n];
         s->sbufAL[n]=(float)sAL; s->sbufAR[n]=(float)sAR;
         s->sbufBL[n]=(float)sBL; s->sbufBR[n]=(float)sBR;
-        mixL=global_saturate(mixL,(double)s->globalSat);mixR=global_saturate(mixR,(double)s->globalSat);
         master_wowflutter_stereo(s,&mixL,&mixR,(double)s->globalWowFlut);
         master_comp(&mixL,&mixR,(double)s->masterComp,&s->compEnvL,&s->compEnvR);
-        if(s->masterLoCut>21.0f){mixL=bq_L(&s->masterLo,mixL);mixR=bq_R(&s->masterLo,mixR);}
-        if(s->masterHiCut<19999.0f){mixL=bq_L(&s->masterHi,mixL);mixR=bq_R(&s->masterHi,mixR);}
         stumble_sample(s,&mixL,&mixR);   /* Perform: master stochastic glitch */
         dropout_sample(s,&mixL,&mixR);
         if(s->mClockSpot==0) master_clockfilter(s,&mixL,&mixR);   /* Clock+filter pre-punch (default) */
@@ -2433,6 +2430,20 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         if(s->mClockSpot==1) master_clockfilter(s,&mixL,&mixR);   /* Clock+filter post-punch */
         drift_sample(s,&mixL,&mixR);         /* Drift: global COSMOS memory layer (Sample menu) */
         perf_pump(s,&mixL,&mixR);            /* Perform K7/K8: rhythmic ducking pump */
+        /* ---- OUTPUT STAGE ---------------------------------------------------------
+         * gSat, LoCut and HiCut used to sit BEFORE the punch bank, which meant the
+         * output machine was colouring the signal three stages downstream of filters
+         * and drive that were supposed to be part of it. Moved here so everything the
+         * Output page controls is one contiguous block after every generator, effect
+         * and modulator - the machine the loops actually reach the world through.
+         * Side effect, and a good one: gSat now sits immediately before Character, so
+         * it reads as how hard you DRIVE the machine.
+         * Consequence to know: punch, Drift and Pump now receive the raw summed mix -
+         * full bandwidth and unbounded, where global_saturate used to quietly clamp
+         * everything downstream of it. */
+        mixL=global_saturate(mixL,(double)s->globalSat);mixR=global_saturate(mixR,(double)s->globalSat);
+        if(s->masterLoCut>21.0f){mixL=bq_L(&s->masterLo,mixL);mixR=bq_R(&s->masterLo,mixR);}
+        if(s->masterHiCut<19999.0f){mixL=bq_L(&s->masterHi,mixL);mixR=bq_R(&s->masterHi,mixR);}
         master_character(s,&mixL,&mixR);     /* Settings: console/sampler colour */
         master_glue(s,&mixL,&mixR);          /* Settings: bus glue comp */
         mixL*=(double)s->masterVol; mixR*=(double)s->masterVol;   /* master output level */

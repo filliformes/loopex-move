@@ -313,6 +313,9 @@ const LOOP_MULTS = [1.0, 0.5, 0.25, 0.125];
 const loopMultIdx = new Array(NV).fill(0);
 let menu = -1, menuReload = false, menuPage = 0;
 const MENU_PAGED = { 1: true, 3: true };   /* Perform + Settings have a 2nd knob page */
+/* Per-page titles where the two pages are different things. Settings p1 is behaviour and
+   I/O; p2 is the output machine, so calling the whole menu 'Output' would mislabel p1. */
+const MENU_PAGE_NAMES = { 3: ['Settings', 'Output'] };
 function curMenuDefs() { const d = MENU_DEFS[menu]; if (!d) return null; return MENU_PAGED[menu] ? d.slice(menuPage * 8, menuPage * 8 + 8) : d; }
 function menuPages() { const d = MENU_DEFS[menu]; return (d && MENU_PAGED[menu]) ? Math.ceil(d.length / 8) : 1; }
 const menuVals = [0,0,0,0,0,0,0,0];
@@ -1085,7 +1088,8 @@ function drawKnobView() {
                           footer = (delStepHeld >= 0) ? [[String(delStepHeld + 1), stepMirror[delStepHeld].n ? stepMirror[delStepHeld].pads.map(x => PUNCH_NAMES[x]).join('+') : 'empty']]
                                                       : [['X+Pad+Step', 'Write'], ['X', 'Run']]; }
     else if (menu >= 0) { defs = curMenuDefs(); title = (menu === 5) ? 'Sessions' : 'Loopex';
-                          pageName = (menu === 5) ? (sessCurrent > 0 ? 'Session ' + sessCurrent : 'New') : MENU_NAMES[menu]; scope = 'm' + menu;
+                          pageName = (menu === 5) ? (sessCurrent > 0 ? 'Session ' + sessCurrent : 'New')
+                                    : ((MENU_PAGE_NAMES[menu] && MENU_PAGE_NAMES[menu][menuPage]) || MENU_NAMES[menu]); scope = 'm' + menu;
                           footer = (menu === 5) ? [[String(sessSlot) + (sessSlot === sessCurrent ? '*' : ''), sessNames[sessSlot] ? prettySess(sessNames[sessSlot]) : 'empty'], ['Back', 'Exit']] : [['Back', 'Exit']]; }
     else if (inPunch)   { defs = null; title = 'Punch'; pageName = PUNCH_NAMES[punchActive]; scope = 'p' + punchActive;
                           footer = [['Press', PUNCH_PRESS[punchActive]]]; }

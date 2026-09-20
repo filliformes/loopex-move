@@ -90,6 +90,7 @@ typedef struct {
     void  *plate;             /* Dattorro plate state (pfx_plate_t*), alloc'd at create */
     void  *fdn;               /* Quartz/Prism FDN state (pfx_fdn_t*), alloc'd at create — one pool, both modes */
     void  *veil;              /* Veil Householder FDN state (pfx_veil_t*), alloc'd at create */
+    float lvlDry, lvlWet, lvlGain;   /* Character-group level match (see pfx_process) */
 } slot_dsp_t;
 
 typedef void (*fx_process_fn)(slot_dsp_t*, float*, float*, int,
@@ -1340,6 +1341,7 @@ static const palette_effect_t FX_TABLE[PFX_COUNT] = {
 struct pfx_slot {
     slot_dsp_t dsp;
     int   select;                 /* PFX_* id (0 = Off) */
+    float gate;                   /* 0..1 fade-in after a switch; see pfx_process */
     void *space_pool, *bloom_pool;/* pre-allocated Clouds engines (SPACE / BLOOM) */
 };
 
@@ -1413,14 +1415,65 @@ void pfx_select(pfx_slot *s, int id){
     s->dsp.heavy_kind = want ? id : 0;
     pfx_slot_reset(&s->dsp);                     /* clear scratch (heavy preserved) */
     s->select = id;
+    s->gate   = 0.0f;                            /* new effect fades in rather than appearing */
 }
 
+/* The Character group are all LEVEL-NORMALISING distortions: they push toward a fixed
+ * output level, so quiet material gets enormous gain while loud material barely moves.
+ * Measured against pink noise, Drive/Fuzz/Howl all reach +19 to +22 dB on a -24 dBFS
+ * source while sitting at +1 to +10 dB on a -12 dBFS one, and each hits its levelling
+ * point at a different Amount - which is why they felt both extreme and inconsistent with
+ * each other. A static makeup cannot fix that, because the error tracks input level.
+ * Sweeten was the exception, being the only one carrying an output compensation term.
+ * So: track dry and wet power (~100 ms) and pull the wet back toward the dry level. Only
+ * PARTWAY - LVL_MATCH below - because these are meant to be loud; the goal is to tame the
+ * extremes and line the four up with each other, not to flatten them to unity. */
+#define LVL_MATCH 0.75f
+static int pfx_is_character(int id){
+    return id==PFX_DRIVE||id==PFX_SWEETEN||id==PFX_FUZZ||id==PFX_HOWL||id==PFX_FOLD||id==PFX_SWELL;
+}
 void pfx_process(pfx_slot *s, float *l, float *r, int n,
                  float amount, float macro, float drift){
     if(!s || s->select == PFX_OFF) return;       /* Off = passthrough */
+    /* Switching used to swap the effect instantaneously: the old one's tail vanished with
+     * its state and the new one appeared cold at full level, which clicks every time you
+     * sweep the list. Keep a copy of the incoming send and crossfade the new effect up
+     * from it over ~14 ms, so stepping through the effects morphs instead of snapping. */
+    #define PFX_FADE_MAX 256
+    float fdl[PFX_FADE_MAX], fdr[PFX_FADE_MAX];
+    int fade = (s->gate < 0.999f) && (n <= PFX_FADE_MAX);
+    if(fade){ for(int i=0;i<n;i++){ fdl[i]=l[i]; fdr[i]=r[i]; } }
+    int match = pfx_is_character(s->select) && amount > 0.01f;
+    float dp = 0.0f;
+    if(match) for(int i=0;i<n;i++) dp += l[i]*l[i] + r[i]*r[i];
     if(is_clouds_fx(s->select)){
         pfx_clouds_process(s->select, s->dsp.heavy, l, r, n, amount, macro, drift);
     } else {
         FX_TABLE[s->select].process(&s->dsp, l, r, n, amount, macro, drift);
     }
+    if(match){
+        float wp = 0.0f;
+        for(int i=0;i<n;i++) wp += l[i]*l[i] + r[i]*r[i];
+        float inv = 1.0f/(float)(n*2);
+        s->dsp.lvlDry += ((dp*inv) - s->dsp.lvlDry) * 0.02f;   /* ~100 ms at block rate */
+        s->dsp.lvlWet += ((wp*inv) - s->dsp.lvlWet) * 0.02f;
+        float tg = 1.0f;
+        if(s->dsp.lvlWet > 1e-9f && s->dsp.lvlDry > 1e-9f){
+            tg = sqrtf(s->dsp.lvlDry / s->dsp.lvlWet);
+            tg = 1.0f + (tg - 1.0f) * LVL_MATCH;
+            if(tg > 4.0f) tg = 4.0f; else if(tg < 0.05f) tg = 0.05f;
+        }
+        if(s->dsp.lvlGain <= 0.0f) s->dsp.lvlGain = tg;
+        for(int i=0;i<n;i++){                                   /* ramp across the block */
+            s->dsp.lvlGain += (tg - s->dsp.lvlGain) * 0.002f;
+            l[i] *= s->dsp.lvlGain; r[i] *= s->dsp.lvlGain;
+        }
+    }
+    if(fade){
+        for(int i=0;i<n;i++){
+            s->gate += (1.0f - s->gate) * 0.0016f;              /* ~14 ms */
+            l[i] = fdl[i] + (l[i]-fdl[i]) * s->gate;
+            r[i] = fdr[i] + (r[i]-fdr[i]) * s->gate;
+        }
+    } else s->gate = 1.0f;
 }

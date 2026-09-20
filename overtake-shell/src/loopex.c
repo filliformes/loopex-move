@@ -248,7 +248,7 @@ static inline double tape_sat(double x) {
  * input_generations, which applies the SAME filter once per dubbing pass. */
 static const double TAPE_LOSS_K[13] = {
     1.0,   /* 0 Tapeless */  1.0,   /* 1 Clean  */  0.296, /* 2 Cass1  */  0.225, /* 3 Cass2 */
-    0.120, /* 4 VHS1     */  0.088, /* 5 VHS2   */  0.923, /* 6 Reel15 */  0.823, /* 7 Reel7 */
+    0.923, /* 4 VHS1 HiFi*/  0.575, /* 5 VHS2 lin*/  0.923, /* 6 Reel15 */  0.823, /* 7 Reel7 */
     0.580, /* 8 Reel3    */  0.247, /* 9 4trk   */  0.459, /*10 Porta  */  0.211, /*11 Dub   */
     1.0    /*12 Warp     */
 };
@@ -268,15 +268,31 @@ static const double TAPE_LOSS_K[13] = {
  * his model with a separate circuit model. The effective recorded layer is set to the
  * short-wavelength value (self-demagnetisation), which is physically defensible and lands
  * the range musically. The SPEED SCALING is the physics; the absolute reference is ours. */
-static inline void apply_preamp_sample(double *l, double *r, int model, double *casLpL, double *casLpR, uint32_t *rng, double nAmt) {
+static inline void apply_preamp_sample(double *l, double *r, int model, double *casLpL, double *casLpR,
+                                       double *cmpL, double *cmpR, uint32_t *rng, double nAmt) {
     if(model<=0) return;                       /* Tapeless: true bypass, no colour, no noise */
     double noise=lb_rand(rng)*0.005*nAmt;
     switch(model){
     case 1:*l+=noise*0.05;*r+=noise*0.05;break;   /* Clean */
     case 2:{*l=lb_tanh(*l*1.8)+noise;*r=lb_tanh(*r*1.8)+noise;double k=TAPE_LOSS_K[2];*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
     case 3:{*l=atan(*l*1.6)*0.6366+noise;*r=atan(*r*1.6)*0.6366+noise;double k=TAPE_LOSS_K[3];*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 4:{*l=lb_tanh(*l*1.3)+noise*1.5;*r=lb_tanh(*r*1.3)+noise*1.5;double k=TAPE_LOSS_K[4];*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 5:{*l=tape_sat(*l*1.1)+noise*0.5;*r=tape_sat(*r*1.1)+noise*0.5;double k=TAPE_LOSS_K[5];*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    /* VHS1 = Hi-Fi (AFM). Recorded by the ROTATING head at 5.8 m/s - 174x the linear tape
+     * speed - so it is genuinely 20 Hz-20 kHz and must NOT be rolled off. Its character is
+     * the noise reduction: IEC 60774-2 s5.1 specifies peak detection, 2:1 logarithmic
+     * compression, 3-10 ms attack, 70 ms recovery. That compander pumping is the sound. */
+    case 4:{ double d=fmax(fabs(*l),fabs(*r));
+        double a=(d>*cmpL)?0.0032:0.00032;            /* ~5 ms attack / 70 ms recovery */
+        *cmpL+=(d-*cmpL)*a; double e=*cmpL;
+        double gc=(e>0.0016)? pow(e/0.0016,-0.5) : 1.0;   /* 2:1 in the log domain */
+        if(gc>4.0)gc=4.0;
+        *l=lb_tanh(*l*gc*1.05)/1.0+noise*0.08; *r=lb_tanh(*r*gc*1.05)+noise*0.08;
+        double k=TAPE_LOSS_K[4];
+        *casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    /* VHS2 = the LINEAR (longitudinal) track: stationary head at 33.35 mm/s, documented
+     * 70 Hz-10 kHz (JVC service manual), 0.2%% wow, ~45 dB dynamic range. Same 120/3180 us
+     * EQ as a Type I cassette, so the EQ is not what makes it dark - speed and the
+     * 0.35 mm stereo track are. Cassette at 47.6 mm/s is decisively brighter. */
+    case 5:{*l=tape_sat(*l*1.1)+noise*0.9;*r=tape_sat(*r*1.1)+noise*0.9;double k=TAPE_LOSS_K[5];*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
     case 6:{*l=tape_sat(*l)+noise*0.15;*r=tape_sat(*r)+noise*0.15;double k=TAPE_LOSS_K[6];
         *casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
     case 7:{*l=tape_sat(*l*1.15)+noise*0.3;*r=tape_sat(*r*1.15)+noise*0.3;double k=TAPE_LOSS_K[7];*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
@@ -540,7 +556,7 @@ typedef struct {
     float armThresh;         /* threshold-armed record level (0..1) */
     Biquad inEqLo,inEqMid,inEqHi,inTapeLp,inTapeHp;
     double iFlutBufL[FLUTTER_BUF],iFlutBufR[FLUTTER_BUF]; int iFlutWr; double iFlutPhW,iFlutPhF;
-    double genLpL[4],genLpR[4];
+    double genLpL[4],genLpR[4]; double vhsCmpL,vhsCmpR;
     /* Session save/load — all disk work happens on a SCHED_OTHER worker (cores 0-2),
      * never on the audio callback. Handshake is atomics only. */
     struct {
@@ -2516,7 +2532,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         int preModel=(int)lb_clampf(s->preamp,0.0f,12.0f);
         double tdG=1.0+(double)s->tapeDrive*3.0;                  /* tape drive w/ unity makeup */
         if(preModel>0&&s->tapeDrive>0.001f){ inL*=tdG; inR*=tdG; }
-        apply_preamp_sample(&inL,&inR,preModel,&s->casLpL,&s->casLpR,&s->rng,(double)s->tapeNoise);
+        apply_preamp_sample(&inL,&inR,preModel,&s->casLpL,&s->casLpR,&s->vhsCmpL,&s->vhsCmpR,&s->rng,(double)s->tapeNoise);
         if(preModel>0&&s->tapeDrive>0.001f){ inL/=tdG; inR/=tdG; }
         if(preModel>0&&s->tapeHF<0.99f){ inL=bq_L(&s->inTapeLp,inL); inR=bq_R(&s->inTapeLp,inR); }
         if(preModel>0&&s->tapeLoCut>0.01f){ inL=bq_L(&s->inTapeHp,inL); inR=bq_R(&s->inTapeHp,inR); }

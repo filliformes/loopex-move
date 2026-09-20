@@ -474,6 +474,7 @@ typedef struct {
     float *drL[4], *drR[4]; int drLen[4]; int drW[4];
     double drPh[4]; float drDL[4], drDR[4]; double drInEnv;
     float drDcXL[4], drDcYL[4], drDcXR[4], drDcYR[4];   /* DC blockers in each Drift feedback line */
+    uint32_t outDitRng;                                 /* TPDF dither for the final 16-bit output */
     float selfDcXL, selfDcYL, selfDcXR, selfDcYR;       /* ...and across the Self (own-output) loop */
     int drSilent; float drBleed;   /* abandoned-tail silence bleed */
     Biquad eqLoSh, eqMidPk, eqHiSh; int eqCrush; float eqSat, eqMakeup; double eqCrushHoldL,eqCrushHoldR; int eqCrushCnt;
@@ -1570,6 +1571,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         s->drW[i]=0; s->drPh[i]=0.25*i; s->drDL[i]=0.0f; s->drDR[i]=0.0f;
         s->drDcXL[i]=s->drDcYL[i]=s->drDcXR[i]=s->drDcYR[i]=0.0f; }
     s->selfDcXL=s->selfDcYL=s->selfDcXR=s->selfDcYR=0.0f;
+    s->outDitRng=0x9E3779B9u;
     for(int i=0;i<DRIFT_N;i++) if(!s->drL[i]||!s->drR[i]){ for(int j=0;j<DRIFT_N;j++){ free(s->drL[j]); free(s->drR[j]); s->drL[j]=NULL; s->drR[j]=NULL; } break; }   /* partial alloc: disable Drift (guarded by drL[0]) */
     s->drInEnv=0.0; s->drSilent=0; s->drBleed=1.0f;
     s->driftAmt=0.0f; s->driftRate=0.30f; s->driftSize=0.50f; s->driftFb=0.60f;
@@ -2323,8 +2325,12 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         mixL*=(double)s->masterVol; mixR*=(double)s->masterVol;   /* master output level */
         tape_limiter(s,&mixL,&mixR);         /* Settings: analog tape limiter (final) */
         s->selfPrevL[n]=(float)mixL; s->selfPrevR[n]=(float)mixR;   /* feed the master-record feedback guard next block */
-        out_interleaved_lr[n*2]=(int16_t)lb_clampd(mixL*32767.0,-32767.0,32767.0);
-        out_interleaved_lr[n*2+1]=(int16_t)lb_clampd(mixR*32767.0,-32767.0,32767.0);
+        /* Dither the FINAL quantise too. Every loop-buffer write already goes through
+         * lb_quant16; this last step to the hardware was still a truncating cast, which
+         * both biases toward zero and leaves the error signal-correlated - audible as
+         * grit on quiet tails, which is exactly the material this instrument makes. */
+        out_interleaved_lr[n*2]  =lb_quant16(lb_clampd(mixL,-1.0,1.0),&s->outDitRng);
+        out_interleaved_lr[n*2+1]=lb_quant16(lb_clampd(mixR,-1.0,1.0),&s->outDitRng);
     }
     lcxl_leds(s);   /* mirror loop state to the LaunchControl XL LEDs (when MIDI Out is on) */
     /* Process the two Palette send buses over the whole block (result feeds the next block) */

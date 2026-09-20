@@ -2484,6 +2484,11 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         int wantSide=(fv->filterSm<=0.5f)?-1:1;
         if(fabsf(fv->filter-fv->filterSm)>0.0002f || wantSide!=fv->djMode || fabsf(fv->djWet-fv->djWetTgt)>0.001f) dj_filter_update(fv); }   /* keep updating while a deferred LP<->HP swap or fade is still settling */
     if(selIdx>=0&&selIdx<NUM_VOICES){Voice *sv=&s->voice[selIdx];dj_filter_update(sv);studer_eq_update(sv);tilt_eq_update(sv);}
+    if(s->preamp!=s->bumpCache){   /* speed-scaled LF head bump, per tape model */
+        int pm=(int)lb_clampf(s->preamp,0.0f,12.0f);
+        if(TAPE_BUMP_DB[pm]>0.05) bq_set_peak(&s->inBump,TAPE_BUMP_HZ[pm],TAPE_BUMP_DB[pm],0.8);
+        else bq_reset(&s->inBump);
+        s->bumpCache=s->preamp; }
     /* Butterworth cascades at the order the selected machine actually uses. 3-pole needs a
      * real pole alongside its quadratic, which is what the one-pole sections are for. */
     { static const double Q2[1]={0.70710678}, Q3[1]={1.0},

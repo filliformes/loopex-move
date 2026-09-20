@@ -121,6 +121,14 @@ static const host_api_v1_t *g_host = NULL;
 /* ---- Utilities ---- */
 static inline float lb_clampf(float x, float lo, float hi) { if(x!=x)return lo; return x < lo ? lo : (x > hi ? hi : x); }
 static inline double lb_clampd(double x, double lo, double hi) { if(x!=x)return lo; return x < lo ? lo : (x > hi ? hi : x); }
+/* sin(2*pi*p) for p in [0,1): parabola + one refinement term, max error ~1e-3. For LFOs only
+ * (Drift ran four libm sin() per sample to wobble delay taps that are then read through
+ * LINEAR interpolation - the approximation error is far below that read's own). */
+static inline double lb_sin01(double p) {
+    double u=2.0*p; if(u>1.0)u-=2.0;             /* angle pi*u == 2*pi*p (mod 2*pi) */
+    double y=4.0*u*(1.0-fabs(u));
+    return y+0.225*(y*fabs(y)-y);
+}
 static inline double lb_tanh(double x) {
     if (x > 3.0) return 1.0; if (x < -3.0) return -1.0;
     double x2 = x * x; return x * (27.0 + x2) / (27.0 + 9.0 * x2);
@@ -2575,7 +2583,7 @@ static inline void drift_sample(loopex_t *s, double *l, double *r){
     for(int i=0;i<DRIFT_N;i++){
         int len=s->drLen[i];
         s->drPh[i]+= baseRate*(1.0+0.137*i); if(s->drPh[i]>=1.0)s->drPh[i]-=1.0;
-        double lfo=sin(6.283185307179586*s->drPh[i]);
+        double lfo=lb_sin01(s->drPh[i]);   /* was libm sin(): 4 per sample, see lb_sin01 */
         double modS = lfo*(double)amt*(double)len*0.03;
         double rp = (double)s->drW[i] - tapFrac*(double)len + modS;
         while(rp<0)rp+=len; while(rp>=len)rp-=len;

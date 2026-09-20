@@ -4,7 +4,11 @@
  * Wraps Signalsmith Stretch 1.1.0 (MIT, Geraint Luff) — a phase-vocoder
  * style shifter with real transient/tonality handling — behind a tiny C API,
  * the same way fx_clouds.cc isolates the Clouds engine. loopex.c only holds
- * a void*. Configured at block 2048 / interval 512 (46 ms / 11.6 ms): total
+ * a void*. Configured at block 2048 / interval 512 (46 ms / 11.6 ms). This
+ * profiles at ~600 us per hop on the Move - a quarter of the callback's slack
+ * in one block - and 1024/256 was tried to halve that peak; it was rejected by
+ * ear ("worse than before for sure"), so the window stays and the cost has to
+ * come off the callback another way. Total
  * latency ~ one block, which loopex.c compensates by nudging the loop's
  * playheads forward when the shifter engages, so a shifted loop stays in
  * time with the others.

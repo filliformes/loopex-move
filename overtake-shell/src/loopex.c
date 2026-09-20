@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdatomic.h>
 #include <sched.h>
 #include <unistd.h>
@@ -45,6 +46,26 @@
 #include <fcntl.h>
 #include "plugin_api_v1.h"
 #include "palette_fx.h"   /* 24-effect Palette engine for the send buses */
+
+/* ---- Stage profiler. ARM virtual counter: ~20 cycles to read, no syscall, so it can
+ * sit inside the sample loop (5 probes x 128 = ~0.3% of a block). Per-stage cycles are
+ * summed per block, converted to us, and the worker dumps avg/peak to a file once a
+ * second while /data/UserData/schwung/loopex-prof.on exists. Off by default: costs
+ * nothing but the probes. */
+#if defined(__aarch64__)
+static inline uint64_t lb_cyc(void){ uint64_t c; __asm__ volatile("mrs %0, cntvct_el0":"=r"(c)); return c; }
+static inline uint64_t lb_cycfrq(void){ uint64_t f; __asm__ volatile("mrs %0, cntfrq_el0":"=r"(f)); return f; }
+#else
+static inline uint64_t lb_cyc(void){ return 0; }
+static inline uint64_t lb_cycfrq(void){ return 1; }
+#endif
+/* Pitch-shifter worker queue: PS_NQ blocks per loop, results collected PS_D blocks after
+ * submission (11.6 ms of deadline for a SCHED_OTHER thread on cores 0-2). */
+#define PS_NQ 16
+#define PS_D  4
+#define PROF_N 10
+static const char *PROF_NAME[PROF_N]={"prep","input","record","voices","punch+drift","master","sendA","sendB","pitchsh","palpunch"};
+#define PROF(k) do{ uint64_t _t=lb_cyc(); s->profAcc[k]+=_t-_pc; _pc=_t; }while(0)
 
 /* ---- Link Audio input SHM (/schwung-link-in): the Schwung host's link-subscriber
  * writes Move's per-track audio here (slots 0-3 = tracks 1-4, 4 = Main), one SPSC
@@ -170,6 +191,12 @@ static inline void lb_loop_read(const int16_t *bl, const int16_t *br, int L, dou
                                 double *l, double *r) {
     int i0=(int)q; if(i0<0)i0=0; if(i0>=L)i0=L-1;
     double f=q-floor(q);
+    /* Unity-rate fast path. A head at default speed advances by exactly 1.0 (every factor
+     * of its rate is IEEE-exact), starts on an integer and wraps by integers, so f is
+     * exactly 0 on every sample. There lb_hermite returns x0 bit-for-bit, and so do both
+     * grit branches - so the answer is a plain load. Two 4-tap interpolations per head
+     * per sample, skipped, with output identical to the last bit. */
+    if(f==0.0){ *l=(double)bl[i0]/32768.0; *r=(double)br[i0]/32768.0; return; }
     int im1=i0-1; if(im1<0)im1+=L;
     int i1=i0+1; if(i1>=L)i1-=L;
     int i2=i1+1; if(i2>=L)i2-=L;
@@ -380,7 +407,17 @@ typedef struct {
     float djReso;                         /* DJ filter resonance (Q) */
     float djWet, djWetTgt;                /* DJ filter dry->filtered blend + its target; the swap waits for djWet~0 */
     float comp, clock;                    /* per-track compressor amount; clock = independent PITCH shift in octaves (-2..2), not the playback rate */
-    void *ps; float psInL[128], psInR[128], psOutL[128], psOutR[128];   /* Signalsmith Stretch (pitch_shift.cc), one block late */
+    void *ps; float psInL[128], psInR[128], psOutL[128], psOutR[128];   /* Signalsmith Stretch (pitch_shift.cc), PS_D+1 blocks late */
+    /* Shifter queue (see ps_worker). Slots indexed by block number; the callback submits and
+     * collects, the worker runs ps_process. Only qSub/qDone cross threads. */
+    float qInL[PS_NQ][128], qInR[PS_NQ][128], qOutL[PS_NQ][128], qOutR[PS_NQ][128];
+    atomic_long qSub, qDone;          /* blocks submitted / finished, exclusive upper bounds */
+    long psEngBlock;                  /* block the current engagement started on */
+    float psSemiReq, psSemiApplied;   /* semitones: requested by the callback, applied by the worker */
+    int psLate; long psLateCount; double psReady;   /* result missing -> ride to dry over ~3 ms; count for the profile */
+    double pitchPow; float pitchPowCache;          /* pow(2,pitch): recomputed only when Pitch moves */
+    double panL_c, panR_c; float panTrigCache;     /* pan law cos/sin: only when smoothed pan moves */
+    double disintFade; float disintCache;          /* pow(0.55,gen): only when a generation lands */
     int psActive, psWarm, psLat, psNudge; double psMix; float psCache;            /* engage state: warm-up count, latency, dry/wet ramp */
     double cEnvL, cEnvR;
     float ampAtk, ampRel;                 /* amp envelope attack/release times (0..1) */
@@ -548,7 +585,11 @@ typedef struct {
     uint32_t outDitRng;                      /* TPDF dither for the final 16-bit output */ double eqCrushHoldL,eqCrushHoldR; int eqCrushCnt;
     double glueEnvL,glueEnvR, tapeLimEnv;
     double compEnvL,compEnvR,casLpL,casLpR;uint32_t rng;
+    uint64_t profAcc[PROF_N]; double profAvg[PROF_N], profPk[PROF_N]; int profTick;   /* stage profiler */
+    sem_t psSem; pthread_t psTh; int psThActive; atomic_int psCancel; long blockNo;   /* pitch-shifter worker */
+    double mclkSemis, mclkRatio; float mclkKnobCache; int mclkModeCache;   /* master_clock: snap+pow cached on the knobs */
     double cpuPct;   /* smoothed render_block load, % of block budget (Overtake CPU meter) */
+    double cpuPeak;  /* worst single block since last read - dropouts come from ONE overrun */
     PolyVoice poly[POLY_VOICES]; int rootNote;   /* MIDI-keyboard playback layer */
     /* Punch-in FX (master insert): up to 4 slots in series, per-effect params */
     float punchParams[NUM_PUNCH][4];   /* [effect][Rate,Pitch,Tone,Mix] */
@@ -560,6 +601,11 @@ typedef struct {
     /* Overdub undo: copy-on-write of the samples an overdub overwrites (one shared buffer) */
     int16_t *undoL,*undoR; uint16_t *undoGen, undoCur; int undoTrack, undoCount, undoLen; atomic_int undoReq;   /* gen stamp per sample: no memset at overdub start */
     atomic_int disintReq;   /* voiceIndex+1: run voice_disintegrate_pass on the worker */
+    /* Waveform display: the callback posts a request, the worker scans the loop and
+     * publishes into the buffer the callback is NOT reading (double-buffered). */
+    atomic_int waveReq;     /* voiceIndex+1 */
+    atomic_int waveRdy;     /* index of the finished buffer, -1 = none yet */
+    char waveOut[2][257]; int waveOutTrack[2];
     /* Tape stop / speed-up (Left / Right arrows): log2 speed, smoothed per sample */
     int tapeHold; double tapeLs, tapeSpd, tapeGain;
     /* Input FX (record chain): full EQ + record tape speed */
@@ -608,13 +654,79 @@ static void session_scan_names(loopex_t *s){
         fclose(f); }
 }
 static void voice_disintegrate_pass(Voice *v);   /* fwd: worker runs it off-callback */
+
+/* Loop waveform for the display: 128 columns x (max,lo), scaled to the loop's own peak.
+ * WORKER ONLY. For a 45 s loop this is ~15,000 scattered reads across a buffer far larger
+ * than L2 - it used to run inside get_param, on the callback, every 12th UI tick, and
+ * being outside render_block it never even showed on the CPU meter. Single pass: the
+ * column extremes give the peak, so the old separate peak scan is gone. Torn int16 reads
+ * while a loop is recording only perturb a pixel. */
+static int wave_compute(Voice *v, char *buf){
+    int LEN=__atomic_load_n(&v->loopLen,__ATOMIC_ACQUIRE);
+    if(LEN<=0||!v->bufferL||!v->bufferR){ buf[0]=0; return 0; }
+    int per=LEN/128; if(per<1)per=1;
+    int step=per/96; if(step<1)step=1;
+    int mxs[128],mns[128],peak=1;
+    for(int b=0;b<128;b++){
+        int base=b*per, mx=-32768, mn=32767;
+        for(int j=0;j<per;j+=step){ int idx=base+j; if(idx>=LEN)break;
+            int a=v->bufferL[idx]; if(a>mx)mx=a; if(a<mn)mn=a;
+            int r=v->bufferR[idx]; if(r>mx)mx=r; if(r<mn)mn=r; }
+        if(mx<mn){ mx=0; mn=0; }
+        mxs[b]=mx; mns[b]=mn;
+        if(mx>peak)peak=mx; if(-mn>peak)peak=-mn; }
+    if(peak<200)peak=200;                        /* near-silence floor: do not amplify noise */
+    for(int b=0;b<128;b++){
+        int hi=(mxs[b]*31)/peak; if(hi>31)hi=31; if(hi<-31)hi=-31;
+        int lo=(mns[b]*31)/peak; if(lo>31)lo=31; if(lo<-31)lo=-31;
+        buf[b*2]  =(char)(48+hi+31);
+        buf[b*2+1]=(char)(48+lo+31); }
+    buf[256]=0; return 256;
+}
+/* Pitch-shifter worker. Signalsmith at 2048/512 profiles at ~600 us per hop on the Move -
+ * a quarter of the callback's slack for ONE pitched loop - so ps_process runs here, on a
+ * SCHED_OTHER thread pinned to cores 0-2 (never above Move's own realtime threads). The
+ * callback submits a block per pitched loop and collects results PS_D blocks later; if a
+ * result is missing it keeps the previous one and rides to dry (voice_render). A worker
+ * more than PS_NQ-4 blocks behind drops the backlog: the callback has been riding dry
+ * for 30 ms by then, and stale audio through the shifter helps nobody. */
+static void *ps_worker(void *arg){
+    loopex_t *s=(loopex_t*)arg;
+    while(1){
+        sem_wait(&s->psSem);
+        if(atomic_load(&s->psCancel)) break;
+        for(int vi=0;vi<NUM_VOICES;vi++){ Voice *v=&s->voice[vi]; if(!v->ps) continue;
+            long sub=atomic_load_explicit(&v->qSub,memory_order_acquire);
+            long done=atomic_load_explicit(&v->qDone,memory_order_relaxed);
+            if(sub-done>PS_NQ-4) done=sub-1;
+            while(done<sub){ int sl=(int)(done%PS_NQ);
+                float semi=v->psSemiReq; if(semi!=v->psSemiApplied){ ps_set_semitones(v->ps,semi); v->psSemiApplied=semi; }
+                memcpy(v->qOutL[sl],v->qInL[sl],sizeof v->qOutL[sl]); memcpy(v->qOutR[sl],v->qInR[sl],sizeof v->qOutR[sl]);
+                ps_process(v->ps,v->qOutL[sl],v->qOutR[sl],128);
+                done++; atomic_store_explicit(&v->qDone,done,memory_order_release); }
+        }
+    }
+    return NULL;
+}
+static void prof_dump(loopex_t *s){
+    struct stat st; if(stat("/data/UserData/schwung/loopex-prof.on",&st)!=0) return;
+    FILE *f=fopen("/data/UserData/schwung/loopex-prof.txt","w"); if(!f) return;
+    double ta=0,tp=0;
+    fprintf(f,"%-12s %8s %8s   (us per 128-frame block; budget 2902, slack ~2370)\n","stage","avg","peak");
+    for(int i=0;i<PROF_N;i++){ fprintf(f,"%-12s %8.1f %8.1f\n",PROF_NAME[i],s->profAvg[i],s->profPk[i]); ta+=s->profAvg[i]; tp+=s->profPk[i]; s->profPk[i]=0.0; }
+    fprintf(f,"%-12s %8.1f %8.1f\n","TOTAL",ta,tp);
+    fprintf(f,"meter %.0f%% avg / %.0f%% peak\n",s->cpuPct,s->cpuPeak);
+    for(int i=0;i<NUM_VOICES;i++){ Voice *v=&s->voice[i]; if(v->psActive)
+        fprintf(f,"shifter ACTIVE on loop %d: Pit=%.4f (%.2f st) mix=%.3f warm=%d/%d late=%ld\n",i+1,v->clock,v->clock*12.0f,v->psMix,v->psWarm,v->psLat,v->psLateCount); }
+    fclose(f);
+}
 static void *session_worker(void *arg){
     loopex_t *s=(loopex_t*)arg;
     char dir[256],path[352];
     while(1){
-        while(!atomic_load(&s->sio.request)&&!atomic_load(&s->sio.cancel)&&!atomic_load(&s->undoReq)&&!atomic_load(&s->disintReq)
+        while(!atomic_load(&s->sio.request)&&!atomic_load(&s->sio.cancel)&&!atomic_load(&s->undoReq)&&!atomic_load(&s->disintReq)&&!atomic_load(&s->waveReq)
 
-              &&atomic_load(&s->fxSel[0])<0&&atomic_load(&s->fxSel[1])<0&&atomic_load(&s->fxSel[2])<0) usleep(20000);
+              &&atomic_load(&s->fxSel[0])<0&&atomic_load(&s->fxSel[1])<0&&atomic_load(&s->fxSel[2])<0){ usleep(20000); if(++s->profTick>=50){ s->profTick=0; prof_dump(s); } }
 
         if(atomic_load(&s->sio.cancel)) break;
 
@@ -629,6 +741,10 @@ static void *session_worker(void *arg){
         /* Overdub undo: put the overwritten samples back (memcpy-sized, off the callback). */
 
         { int dr=atomic_exchange(&s->disintReq,0); if(dr>0){ int t=dr-1; if(t>=0&&t<NUM_VOICES)voice_disintegrate_pass(&s->voice[t]); } }
+        { int wr=atomic_exchange(&s->waveReq,0); if(wr>0){ int t=wr-1; if(t>=0&&t<NUM_VOICES){
+            int cur=atomic_load(&s->waveRdy), nxt=(cur==0)?1:0;   /* write the one the callback isn't reading */
+            wave_compute(&s->voice[t],s->waveOut[nxt]); s->waveOutTrack[nxt]=t;
+            atomic_store(&s->waveRdy,nxt); } } }
         if(atomic_exchange(&s->undoReq,0)){ int t=s->undoTrack;
 
             if(t>=0&&t<NUM_VOICES&&s->undoCount>0&&s->voice[t].loopLen==s->undoLen){ Voice *v=&s->voice[t];
@@ -754,6 +870,13 @@ static void dj_filter_update(Voice *v) {
 }
 static inline void dj_filter_stereo(Voice *v, int voicing, double *l, double *r) {
     v->djWet += (v->djWetTgt - v->djWet)*0.006f;   /* ~4 ms per-sample fade: smooth + always reaches ~0 for the swap */
+    /* Fully bypassed: the blend at the bottom multiplies the filtered signal by ~0 and
+     * throws it away, but it was still being computed for every voice every sample - and
+     * on the low-pass side that is mf_run, a 6-pole ladder. Leaving the filter state stale
+     * is safe: it is stable, so it decays on its own, and re-engage ramps djWet up from 0
+     * over ~4 ms, which covers the restart. djWet itself is still updated above, so the
+     * deferred mode swap still sees it reach 0. */
+    if(v->djWet<1e-4f && v->djWetTgt<1e-4f) return;
     double dl=*l, dr=*r, fl, fr;
     if(v->djMode<0){                       /* low-pass side runs the chosen analog voicing */
         if(voicing<0)voicing=0; if(voicing>=MF_NVOICE)voicing=MF_NVOICE-1;
@@ -769,7 +892,12 @@ static inline void dj_filter_stereo(Voice *v, int voicing, double *l, double *r)
 /* ---- Studer 962 EQ ---- */
 static void voice_antiimage(Voice *v, int k, double rate, double *outL, double *outR) {
     double r=fabs(rate);
-    if(r>=0.999){ v->aiCache[k]=-1.0f; return; }        /* unity+ : bypass, stays bit-exact */
+    /* Bypass above 0.75x. The images this removes land in [Nyquist*rate, SR*rate], so the
+     * lowest one only enters audible range when 22050*rate < 16000, i.e. rate < 0.73. Above
+     * ~0.75 the filter runs and removes nothing anyone can hear - and at 4 playheads per
+     * voice it was 48 stereo biquads per sample at 12 loops. Unity+ still bypasses exactly,
+     * so normal playback stays bit-identical. */
+    if(r>=0.75){ v->aiCache[k]=-1.0f; return; }
     float q=(float)r;
     if(fabsf(q-v->aiCache[k])>0.002f){                  /* recompute coeffs only on a real rate change */
         double cut=r*(SR*0.5)*0.92; if(cut<200.0)cut=200.0;   /* 0.92 = guard band under rate*Nyquist */
@@ -1382,12 +1510,24 @@ static inline void head_jump(Voice *v, int k, double d){
     while(P->phase>=L)P->phase-=L; while(P->phase<0.0)P->phase+=L;
 }
 /* ---- Voice Render (stereo) ---- */
-static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *outR, double *sendAL, double *sendAR, double *sendBL, double *sendBR) {
-    *outL=*outR=*sendAL=*sendAR=*sendBL=*sendBR=0.0;
+/* True when the voice has nothing to render this sample (empty slot, or stopped with the
+ * release fully decayed). Shared by voice_render and the mix loop: profiling showed the
+ * 16 x 128 calls into an early-returning voice_render costing ~86 us a block on a BLANK
+ * session - a third of the whole idle floor - just in call overhead and zeroing outputs.
+ * Carries the one side effect the early-out had (parking playEnv at 0). */
+static inline int voice_idle(Voice *v) {
     int playing=(v->state==VS_PLAYING||v->state==VS_OVERDUBBING);
     int scrubbing=(v->scrubTimer>0)||(v->scrubMix>0.0005f);   /* stay alive through the ease-out */
     int LEN=__atomic_load_n(&v->loopLen,__ATOMIC_ACQUIRE);            /* snapshot: the worker may zero it mid-render */
-    if((!playing && !scrubbing && v->playEnv<0.0005)||LEN<=0||!v->bufferL||!v->bufferR){ if(!playing)v->playEnv=0.0; return; }
+    if((!playing && !scrubbing && v->playEnv<0.0005)||LEN<=0||!v->bufferL||!v->bufferR){ if(!playing)v->playEnv=0.0; return 1; }
+    return 0;
+}
+static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *outR, double *sendAL, double *sendAR, double *sendBL, double *sendBR) {
+    *outL=*outR=*sendAL=*sendAR=*sendBL=*sendBR=0.0;
+    if(voice_idle(v)) return;
+    int playing=(v->state==VS_PLAYING||v->state==VS_OVERDUBBING);
+    int scrubbing=(v->scrubTimer>0)||(v->scrubMix>0.0005f);
+    int LEN=__atomic_load_n(&v->loopLen,__ATOMIC_ACQUIRE);
     int effStart=(int)(v->loopStart*(float)LEN); if(effStart<0)effStart=0; if(effStart>LEN-1)effStart=LEN-1;
     int avail=LEN-effStart; if(avail<1)avail=1;                        /* End is loop LENGTH from Start */
     int effLen=(int)(v->loopEnd*(float)avail); if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;
@@ -1403,7 +1543,12 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
             P->xfPhase=P->phase; P->xf=64; P->phase=(double)effStart; P->dir=1; }
         v->glLastSlice=-1;   /* Seed: don't let the slice tracker overwrite our crossfade */
     }
-    double rate=pow(2.0,(double)v->pitch)*s->tapeSpd;if(v->reverse>0.5f)rate=-rate;
+    /* voice_render runs per SAMPLE, so these three transcendentals were being evaluated
+     * 128x a block per voice for values that only change at knob rate. Cached on their
+     * inputs. pow() is strictly positive and cos^2+sin^2=1 (so the pan pair is never both
+     * zero), which makes a zeroed field an unambiguous "never computed" - no init needed. */
+    if(v->pitchPow<=0.0||v->pitchPowCache!=v->pitch){ v->pitchPow=pow(2.0,(double)v->pitch); v->pitchPowCache=v->pitch; }
+    double rate=v->pitchPow*s->tapeSpd;if(v->reverse>0.5f)rate=-rate;
     /* Perform: Scan - a tape fast-forward, so pitch rides with speed. 2.0x is exactly one
      * octave; the old 3.5x was 1.807 octaves, landing 2.3 semitones short of two and
      * reading as a near-miss rather than a deliberate interval. */
@@ -1551,9 +1696,15 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
      * every playhead forward by that latency so the loop stays in time. Disengage:
      * crossfade back and nudge the heads back. */
     { int want=(v->clock>0.005f||v->clock<-0.005f);
-      if(want&&!v->psActive&&v->ps){ v->psActive=1; v->psWarm=0; v->psMix=0.0; ps_reset(v->ps); v->psLat=ps_latency(v->ps)+128; v->psCache=-99.0f; }
+      /* No ps_reset() here. Signalsmith's reset() zeroes the STFT hop counter, so every
+       * shifter engaged in the same block (a session load) re-aligned and their FFTs all
+       * fired in one callback: profiled at 650 us peak against 160 avg. It is also not
+       * needed: psLat is a full window + 128, so the warm-up flushes anything from a
+       * previous engagement before the crossfade opens. */
+      if(want&&!v->psActive&&v->ps){ v->psActive=1; v->psWarm=0; v->psMix=0.0; v->psLat=ps_latency(v->ps)+128*(PS_D+1); v->psCache=-99.0f;
+          v->psEngBlock=s->blockNo; v->psLate=0; v->psReady=1.0; }
       if(v->psActive){
-        if(v->clock!=v->psCache&&want){ ps_set_semitones(v->ps,v->clock*12.0f); v->psCache=v->clock; }
+        if(v->clock!=v->psCache&&want){ v->psSemiReq=v->clock*12.0f; v->psCache=v->clock; }   /* the worker applies it */
         v->psInL[n]=(float)rawL; v->psInR[n]=(float)rawR;
         double target=0.0;
         if(want){ if(v->psWarm<v->psLat){ v->psWarm++; if(v->psWarm==v->psLat) v->psNudge=v->psLat; } else target=1.0; }
@@ -1561,7 +1712,9 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         v->psMix+=(target-v->psMix)*0.004;   /* ~6 ms ramp */
         if(v->psNudge){ double d=(double)v->psNudge; v->psNudge=0;   /* keep time: the shifted stream lags by psLat */
             for(int k=0;k<4;k++) head_jump(v,k,d); }
-        rawL=rawL*(1.0-v->psMix)+(double)v->psOutL[n]*v->psMix; rawR=rawR*(1.0-v->psMix)+(double)v->psOutR[n]*v->psMix;
+        v->psReady+=((v->psLate?0.0:1.0)-v->psReady)*0.015;   /* worker late: ride to dry over ~3 ms, back when results resume */
+        { double m=v->psMix*v->psReady;
+          rawL=rawL*(1.0-m)+(double)v->psOutL[n]*m; rawR=rawR*(1.0-m)+(double)v->psOutR[n]*m; }
         if(!want&&v->psMix<0.0005){ v->psActive=0; v->psMix=0.0; }
       } }
     double _amp=v->playEnv*_bf;
@@ -1580,7 +1733,11 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
     v->volSm+=((double)v->volume-v->volSm)*0.00227;   /* ~10ms smoothing (no zipper) */
     v->panSm+=((double)v->pan   -v->panSm)*0.00227;
     double vol=v->volSm*_amp,pn=v->panSm;   /* _amp = click-free env x boundary fade */
-    double panL=cos((pn+1.0)*0.25*M_PI),panR=sin((pn+1.0)*0.25*M_PI);
+    /* panSm is smoothed per sample but converges: once the knob stops, pn stops moving and
+     * the pair is reused. 1e-4 of pan is ~0.0008 dB, far under the dither floor. */
+    if((v->panL_c==0.0&&v->panR_c==0.0)||fabs(pn-(double)v->panTrigCache)>1e-4){
+        v->panL_c=cos((pn+1.0)*0.25*M_PI); v->panR_c=sin((pn+1.0)*0.25*M_PI); v->panTrigCache=(float)pn; }
+    double panL=v->panL_c,panR=v->panR_c;
     *outL=sL*vol*panL;*outR=sR*vol*panR;
     double sSig=(sL+sR)*0.5*vol;
     *sendAL=sSig*(double)v->send;  *sendAR=*sendAL;    /* Send A -> delay bus */
@@ -1597,7 +1754,9 @@ static void voice_disintegrate_pass(Voice *v) {
      * wow/flutter and level loss ramping in alongside. Each pass also compounds on the last,
      * so the loop genuinely dissolves step by step instead of in one jump:
      *   pass 1 ~13 kHz, 2 ~5.4 kHz, 3 ~3.2 kHz, 4 ~2.2 kHz, 5 ~1.7 kHz ... -> ~1.1 kHz */
-    double fade=pow(0.55,(double)v->disintGen);            /* 1.0 on the first pass -> 0 */
+    if(v->disintFade<=0.0||v->disintCache!=(float)v->disintGen){
+        v->disintFade=pow(0.55,(double)v->disintGen); v->disintCache=(float)v->disintGen; }
+    double fade=v->disintFade;                             /* 1.0 on the first pass -> 0 */
     double stabK=0.15+0.70*fade;
     double satAmt=(double)v->saturation*0.3*(1.0-0.5*fade);
     double wfAmt =(double)v->wowFlutter*0.2*(1.0-0.5*fade);
@@ -1687,7 +1846,12 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         v->flutNextMax=0.5;v->rng=12345+i*7919;v->ditRng=0x9E3779B9u+(uint32_t)i*2654435761u;v->glLastSlice=-1;
         v->djReso=0.0f;v->djWet=0.0f;v->djWetTgt=0.0f;v->ampAtk=0.0f;v->ampRel=0.0f;v->ampAtkCache=-1.0f;v->ampRelCache=-1.0f;v->lfModeCache=-99;v->lfG=0.5f;
         v->comp=0.0f;v->clock=0.0f;v->psCache=-99.0f;v->psActive=0;v->psMix=0.0;v->psNudge=0;
-        v->ps=ps_create(44100.0f,128,(i*512)/NUM_VOICES);   /* staggered so the 16 STFTs do not land in one callback */
+        /* Stagger the STFT hop phase so the 16 FFTs (one per 512-sample interval each) never
+         * land in one callback. Interleaved, not consecutive: (i*512)/16 put loops 1-4 all in
+         * the same 128-sample block phase, which is the common "Pitch on the first few loops"
+         * case. i%4 picks the block phase, i/4 the offset inside it. Blocks are always 128,
+         * which divides 512, so the phase set here holds for the life of the instance. */
+        v->ps=ps_create(44100.0f,128,(i%4)*128+(i/4)*32);
         v->filterSm=0.5f;v->volSm=(double)v->volume;v->panSm=0.0;
         /* heads: 1 on @1x, 2 off @0.5x, 3 off @2x, 4 off @1x  (spd: 0.5=1x, 0.25=0.5x, 0.75=2x) */
         for(int k=0;k<4;k++){ v->ph[k].mode=0; v->ph[k].dir=1; v->ph[k].env=0.0; v->ph[k].phase=0.0; v->ph[k].spdCache=-1.0f; v->ph[k].jumpCd=0; }
@@ -1705,7 +1869,8 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     s->globalWowFlut=0.0f;s->inputMonitor=0.5f;s->inputGain=1.0f;s->gFlutNextMax=0.5;
     for(int k=0;k<3;k++){ bq_reset(&s->masterLo[k]); bq_reset(&s->masterHi[k]); }
     s->loOneL=s->loOneR=s->hiOneL=s->hiOneR=0.0; s->loOneK=s->hiOneK=0.0; s->eqPoles=2;
-    s->cpuPct=0.0; s->rootNote=60;   /* C3 plays the loop at its recorded speed */
+    s->cpuPct=0.0; s->cpuPeak=0.0; s->rootNote=60;
+    atomic_store(&s->waveReq,0); atomic_store(&s->waveRdy,-1); s->waveOutTrack[0]=s->waveOutTrack[1]=-1;   /* C3 plays the loop at its recorded speed */
     for(int i=0;i<NUM_PSLOTS;i++){s->pslot[i].idx=-1;bq_reset(&s->pslot[i].toneFilt);}
     for(int i=0;i<NUM_PUNCH;i++){s->punchParams[i][0]=0.5f;s->punchParams[i][1]=0.5f;s->punchParams[i][2]=1.0f;s->punchParams[i][3]=1.0f;s->punchPress[i]=0.0f;}
     s->inLow=0.0f;s->inMid=0.0f;s->inMidFreq=0.5f;s->inHigh=0.0f;s->inHighFreq=0.5f;
@@ -1759,6 +1924,15 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         pthread_setaffinity_np(s->sio.th,sizeof(cs),&cs);
         atomic_store(&s->sio.request,4);   /* populate the slot-name cache off the callback */
     }
+    /* Pitch-shifter worker: same discipline (SCHED_OTHER, cores 0-2), woken per block by sem_post. */
+    atomic_store(&s->psCancel,0); s->blockNo=0;
+    if(sem_init(&s->psSem,0,0)==0 && pthread_create(&s->psTh,NULL,ps_worker,s)==0){
+        s->psThActive=1;
+        struct sched_param sp2; memset(&sp2,0,sizeof sp2);
+        pthread_setschedparam(s->psTh,SCHED_OTHER,&sp2);
+        cpu_set_t cs2; CPU_ZERO(&cs2); CPU_SET(0,&cs2); CPU_SET(1,&cs2); CPU_SET(2,&cs2);
+        pthread_setaffinity_np(s->psTh,sizeof(cs2),&cs2);
+    }
     /* Overtake: no sample browser (file I/O forbidden on the audio callback; live
      * looping records from the input). Browser stays empty and harmless. */
     return s;
@@ -1766,6 +1940,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
 static void destroy_instance(void *inst){loopex_t *s=(loopex_t*)inst;if(!s)return;
     if(s->sio.active){ atomic_store(&s->sio.cancel,1); atomic_store(&s->sio.request,1); /* wake */
         pthread_join(s->sio.th,NULL); s->sio.active=0; }   /* join BEFORE freeing buffers */
+    if(s->psThActive){ atomic_store(&s->psCancel,1); sem_post(&s->psSem); pthread_join(s->psTh,NULL); s->psThActive=0; sem_destroy(&s->psSem); }   /* join BEFORE ps_destroy */
     for(int i=0;i<NUM_VOICES;i++){free(s->voice[i].bufferL);free(s->voice[i].bufferR);ps_destroy(s->voice[i].ps);}
     for(int i=0;i<4;i++){free(s->drL[i]);free(s->drR[i]);}
     if(s->laShm)munmap(s->laShm,sizeof(la_in_shm_t)); if(s->laFd>=0)close(s->laFd);
@@ -1983,21 +2158,30 @@ static inline void master_clock(loopex_t *s, double *l, double *r){
 
     double _dryL=*l,_dryR=*r;
 
-    double semis = ((double)s->mClock-0.5)*48.0;             /* +-24 st */
-
-    if(s->mClockMode==0){ int best=6; double bd=1e9;         /* snap to musical intervals */
-
-        for(int i=0;i<13;i++){ double dd=fabs(semis-MCLK_SEMI[i]); if(dd<bd){bd=dd;best=i;} } semis=MCLK_SEMI[best]; }
+    /* The snap search and pow() depend only on the two knobs, yet ran every sample - and
+     * so did the whole shifter below, at unity, crossfaded to dry with wet=0. Profiled at
+     * ~100 us a block for nothing. Both are now cached / bypassed; pow() is strictly
+     * positive, so mclkRatio==0 doubles as "never computed" with no init. */
+    if(s->mclkRatio<=0.0 || s->mClock!=s->mclkKnobCache || s->mClockMode!=s->mclkModeCache){
+        double semis=((double)s->mClock-0.5)*48.0;             /* +-24 st */
+        if(s->mClockMode==0){ int best=6; double bd=1e9;         /* snap to musical intervals */
+            for(int i=0;i<13;i++){ double dd=fabs(semis-MCLK_SEMI[i]); if(dd<bd){bd=dd;best=i;} } semis=MCLK_SEMI[best]; }
+        s->mclkSemis=semis; s->mclkRatio=pow(2.0,semis/12.0);
+        s->mclkKnobCache=s->mClock; s->mclkModeCache=s->mClockMode; }
+    double semis=s->mclkSemis;
 
     float _wetT=(fabs(semis)<0.5)?0.0f:1.0f; s->mclkWet+=(_wetT-s->mclkWet)*0.02f;   /* crossfade dry<->shifted */
 
-    double ratio = pow(2.0, semis/12.0);   /* ~1 near unity; the wet crossfade fades it to true dry */
+    double ratio = s->mclkRatio;           /* ~1 near unity; the wet crossfade fades it to true dry */
 
     s->mclkRatioSm += ((float)ratio - s->mclkRatioSm)*0.02f;  /* glide ratio: no zipper on K4 */
 
     double rr = s->mclkRatioSm;
 
     s->mclkBufL[s->mclkW]=(float)*l; s->mclkBufR[s->mclkW]=(float)*r;
+    /* Unity: the output IS the dry signal. Ring stays warm (written above) so an engage
+     * never reads stale audio; the write head still advances. */
+    if(s->mclkWet<1e-4f && _wetT==0.0f){ s->mclkW=(s->mclkW+1)&(MCLK_W-1); return; }
 
     const double W=MCLK_W;
 
@@ -2447,6 +2631,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     if(frames>128)frames=128; if(frames<0)frames=0;   /* host is fixed at 128; guard the per-block arrays */
     lb_enable_ftz();   /* denormal flush-to-zero on the audio thread */
     struct timespec _t0; clock_gettime(CLOCK_MONOTONIC,&_t0);
+    uint64_t _pc=lb_cyc();
     /* A finished session load hands back a settings blob — apply it here (bounded
      * string parse, no I/O), once, at block start. */
     if(atomic_load(&s->sio.applyState)){ atomic_store(&s->sio.applyState,0); set_param(s,"state",s->sio.stateBuf); }
@@ -2507,6 +2692,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     punch_prep(s);   /* per-block: punch slot tone-filter coeffs */
     fxseq_tick(s,frames);   /* FX sequencer: step clock, chance, gate */
 
+    PROF(0);
     for(int n=0;n<frames;n++){
 
         /* Tape transport gesture: Left brakes to a stop (~3 s), Right winds up to a tone (~2.5 s),
@@ -2572,6 +2758,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
           if(lvl>(double)s->armThresh){
             for(int vi=0;vi<NUM_VOICES;vi++){ Voice *v=&s->voice[vi];
                 if(v->armed){ v->armed=0; v->state=VS_RECORDING; v->recHead=0; v->loopLen=0; } } } }
+        PROF(1);
         for(int vi=0;vi<NUM_VOICES;vi++){Voice *v=&s->voice[vi];
             if(v->state==VS_RECORDING){if(v->recHead<LOOP_SAMPLES){v->bufferL[v->recHead]=inSL;v->bufferR[v->recHead]=inSR;v->recHead++;}
                 if(v->recHead>=LOOP_SAMPLES){v->loopLen=LOOP_SAMPLES;v->playHead=0;v->playPhase=0.0;v->state=VS_PLAYING;}}
@@ -2603,11 +2790,14 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
                     v->bufferR[v->playHead]=lb_quant16(lb_clampd(oR*0.85+xR,-1.0,1.0),&v->ditRng);break;}}}}}
 
         double mixL=0.0,mixR=0.0,sAL=0.0,sAR=0.0,sBL=0.0,sBR=0.0;
-        for(int vi=0;vi<NUM_VOICES;vi++){double vL,vR,aL,aR,bL,bR;
+        PROF(2);
+        for(int vi=0;vi<NUM_VOICES;vi++){ if(voice_idle(&s->voice[vi]))continue;   /* skip the call entirely, see voice_idle */
+            double vL,vR,aL,aR,bL,bR;
             voice_render(&s->voice[vi],s,n,&vL,&vR,&aL,&aR,&bL,&bR);mixL+=vL;mixR+=vR;sAL+=aL;sAR+=aR;sBL+=bL;sBR+=bR;}
         poly_sample(s,&mixL,&mixR,&sAL,&sAR,&sBL,&sBR);   /* MIDI-keyboard poly layer */
         if(s->inputMonitor>0.005f){double mg=(double)s->inputMonitor;mixL+=inL*mg;mixR+=inR*mg;}
 
+        PROF(3);
         /* Global FX: add the previous block's Palette send returns; capture this block's inputs */
         mixL += (double)s->sretAL[n] + (double)s->sretBL[n];
         mixR += (double)s->sretAR[n] + (double)s->sretBR[n];
@@ -2646,6 +2836,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
           mixL=xl; mixR=xr; }
         if(s->mClockSpot==1) master_clockfilter(s,&mixL,&mixR);   /* Clock+filter post-punch */
         drift_sample(s,&mixL,&mixR);         /* Drift: global COSMOS memory layer (Sample menu) */
+        PROF(4);
         perf_pump(s,&mixL,&mixR);            /* Perform K7/K8: rhythmic ducking pump */
         /* ---- OUTPUT STAGE ---------------------------------------------------------
          * gSat, LoCut and HiCut used to sit BEFORE the punch bank, which meant the
@@ -2694,19 +2885,35 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
          * grit on quiet tails, which is exactly the material this instrument makes. */
         out_interleaved_lr[n*2]  =lb_quant16(lb_clampd(mixL,-1.0,1.0),&s->outDitRng);
         out_interleaved_lr[n*2+1]=lb_quant16(lb_clampd(mixR,-1.0,1.0),&s->outDitRng);
+        PROF(5);
     }
     lcxl_leds(s);   /* mirror loop state to the LaunchControl XL LEDs (when MIDI Out is on) */
     /* Process the two Palette send buses over the whole block (result feeds the next block) */
     if(s->busA&&!atomic_load(&s->fxBusy[0])){ pfx_process(s->busA,s->sbufAL,s->sbufAR,frames,s->sendAM1,s->sendAM2,s->sendADrift);
         memcpy(s->sretAL,s->sbufAL,(size_t)frames*sizeof(float)); memcpy(s->sretAR,s->sbufAR,(size_t)frames*sizeof(float)); }
     else { memset(s->sretAL,0,(size_t)frames*sizeof(float)); memset(s->sretAR,0,(size_t)frames*sizeof(float)); }
+    PROF(6);
     if(s->busB&&!atomic_load(&s->fxBusy[1])){ pfx_process(s->busB,s->sbufBL,s->sbufBR,frames,s->sendBM1,s->sendBM2,s->sendBDrift);
         memcpy(s->sretBL,s->sbufBL,(size_t)frames*sizeof(float)); memcpy(s->sretBR,s->sbufBR,(size_t)frames*sizeof(float)); }
     else { memset(s->sretBL,0,(size_t)frames*sizeof(float)); memset(s->sretBR,0,(size_t)frames*sizeof(float)); }
-    /* Per-loop pitch shifters: this block's input becomes next block's output (one block late) */
-    for(int vi=0;vi<NUM_VOICES;vi++){ Voice *v=&s->voice[vi]; if(!v->psActive||!v->ps)continue;
-        memcpy(v->psOutL,v->psInL,sizeof v->psOutL); memcpy(v->psOutR,v->psInR,sizeof v->psOutR);
-        ps_process(v->ps,v->psOutL,v->psOutR,frames); }
+    PROF(7);
+    /* Per-loop pitch shifters, off the callback (ps_worker): submit this block, collect the
+     * result from PS_D blocks ago for the next block's voice_render. Two memcpys per
+     * pitched loop and one sem_post are all that runs here. */
+    { long k=s->blockNo; int any=0;
+      for(int vi=0;vi<NUM_VOICES;vi++){ Voice *v=&s->voice[vi]; if(!v->psActive||!v->ps)continue;
+        int sl=(int)(k%PS_NQ);
+        memcpy(v->qInL[sl],v->psInL,sizeof v->psInL); memcpy(v->qInR[sl],v->psInR,sizeof v->psInR);
+        atomic_store_explicit(&v->qSub,k+1,memory_order_release); any=1;
+        long r=k-PS_D; if(r<v->psEngBlock){ v->psLate=0; continue; }   /* warm-up: nothing due yet (psMix is 0) */
+        long done=atomic_load_explicit(&v->qDone,memory_order_acquire);
+        if(done>r){ int rs=(int)(r%PS_NQ);
+            memcpy(v->psOutL,v->qOutL[rs],sizeof v->psOutL); memcpy(v->psOutR,v->qOutR[rs],sizeof v->psOutR); v->psLate=0; }
+        else { if(!v->psLate)v->psLateCount++; v->psLate=1; }   /* keep the last block; voice_render rides to dry */
+      }
+      if(any) sem_post(&s->psSem);
+      s->blockNo=k+1; }
+    PROF(8);
     /* Palette punch slot: process the block it captured, ready for the next one */
     for(int si=0;si<NUM_PSLOTS;si++){ PunchSlot *ps=&s->pslot[si]; if(ps->idx<0||PUNCH_DEFS[ps->idx].mech!=PM_PALETTE)continue;
         memcpy(ps->poutL,ps->pinL,sizeof ps->poutL); memcpy(ps->poutR,ps->pinR,sizeof ps->poutR);
@@ -2718,11 +2925,16 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     s->inputPeakL*=0.95;s->inputPeakR*=0.95;
 
     /* CPU meter: render time as % of the block budget (frames/SR), smoothed. */
+    PROF(9);
+    { double k=1e6/(double)lb_cycfrq();
+      for(int i=0;i<PROF_N;i++){ double us=(double)s->profAcc[i]*k; s->profAcc[i]=0;
+          s->profAvg[i]+=0.1*(us-s->profAvg[i]); if(us>s->profPk[i])s->profPk[i]=us; } }
     struct timespec _t1; clock_gettime(CLOCK_MONOTONIC,&_t1);
     double _us=(double)(_t1.tv_sec-_t0.tv_sec)*1e6+(double)(_t1.tv_nsec-_t0.tv_nsec)/1e3;
     double _budget=(double)frames/SR*1e6;
     double _pct=(_budget>0.0)?100.0*_us/_budget:0.0;
     s->cpuPct+=0.1*(_pct-s->cpuPct);
+    if(_pct>s->cpuPeak)s->cpuPeak=_pct;   /* peak-hold: the average hides the block that clicks */
 }
 
 /* ---- Parameters ---- */
@@ -3117,34 +3329,21 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
 
     /* Overtake: Manager discovery + UI feedback */
     if(strcmp(key,"module_id")==0)return snprintf(buf,buf_len,"loopex");
-    if(strcmp(key,"cpu")==0)return snprintf(buf,buf_len,"%.1f",s->cpuPct);
+    if(strcmp(key,"cpu")==0){   /* "avg/peak"; reading it RESETS the peak so each poll is a fresh window */
+        double pk=s->cpuPeak; s->cpuPeak=0.0;
+        return snprintf(buf,buf_len,"%.0f/%.0f",s->cpuPct,pk); }
     if(strcmp(key,"sessStatus")==0){ static const char *st[]={"","Saving..","Loading..","OK","Empty"};
         int i=atomic_load(&s->sio.status); if(i<0||i>4)i=0; return snprintf(buf,buf_len,"%s",st[i]); }
     if(strcmp(key,"sessSlot")==0)return snprintf(buf,buf_len,"%d",atomic_load(&s->sio.slot));
     if(strcmp(key,"sessName")==0){ int n=atomic_load(&s->sio.slot); if(n<1||n>NUM_SLOTS)n=1; return snprintf(buf,buf_len,"%s",s->sio.names[n]); }
     if(strcmp(key,"sessNames")==0){ int p=0; for(int n=1;n<=NUM_SLOTS&&p<buf_len-2;n++) APP("%s%s",s->sio.names[n],(n<NUM_SLOTS)?";":""); return p; }
-    if(strcmp(key,"wave")==0){   /* 128 columns x (max,lo) min/max envelope, auto-normalised */
+    if(strcmp(key,"wave")==0){   /* 128 columns x (max,lo): computed on the WORKER, see wave_compute */
         int si=s->selTrack-1; if(si<0||si>=NUM_VOICES)return -1; Voice *v=&s->voice[si];
-        if(v->loopLen<=0||buf_len<258){ buf[0]=0; return 0; }
-        int per=v->loopLen/128; if(per<1)per=1;
-        int step=per/96; if(step<1)step=1;
-        int peak=1;                                  /* scale to the loop own peak, like the Move display */
-        for(int i=0;i<v->loopLen;i+=step*4){
-            int a=v->bufferL[i]; if(a<0)a=-a;
-            int r=v->bufferR[i]; if(r<0)r=-r; if(r>a)a=r;
-            if(a>peak)peak=a; }
-        if(peak<200)peak=200;                        /* near-silence floor: do not amplify noise */
-        for(int b=0;b<128;b++){
-            int base=b*per, mx=-32768, mn=32767;
-            for(int j=0;j<per;j+=step){ int idx=base+j; if(idx>=v->loopLen)break;
-                int a=v->bufferL[idx]; if(a>mx)mx=a; if(a<mn)mn=a;
-                int r=v->bufferR[idx]; if(r>mx)mx=r; if(r<mn)mn=r; }
-            if(mx<mn){ mx=0; mn=0; }
-            int hi=(mx*31)/peak; if(hi>31)hi=31; if(hi<-31)hi=-31;
-            int lo=(mn*31)/peak; if(lo>31)lo=31; if(lo<-31)lo=-31;
-            buf[b*2]  =(char)(48+hi+31);
-            buf[b*2+1]=(char)(48+lo+31); }
-        buf[256]=0; return 256; }
+        if(v->loopLen<=0||buf_len<258){ buf[0]=0; return 0; }   /* empty slot: an empty string, so the UI clears */
+        atomic_store(&s->waveReq,si+1);                          /* ask for a fresh one (coalesces: latest wins) */
+        int r=atomic_load(&s->waveRdy);
+        if(r<0||s->waveOutTrack[r]!=si)return -1;                /* nothing for THIS loop yet: UI keeps its (cleared) state */
+        memcpy(buf,s->waveOut[r],257); return 256; }
     if(strcmp(key,"heads")==0){   /* "m,pos" x4 — pos 0..999 across the loop */
         int si=s->selTrack-1; if(si<0||si>=NUM_VOICES)return -1; Voice *v=&s->voice[si];
         int p=0; double L=(v->loopLen>0)?(double)v->loopLen:1.0;

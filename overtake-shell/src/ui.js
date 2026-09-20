@@ -1187,7 +1187,7 @@ function drawWaveView() {
             if (yBot < yTop) { const t = yTop; yTop = yBot; yBot = t; }
             fill_rect(x, yTop, 1, Math.max(1, yBot - yTop + 1), 1);
         }
-    } else {
+    } else if (voiceState[sel] === 0) {   /* the UI already knows the slot state - never label a loading loop 'empty' */
         tzPrint(ctx, 2, 30, 'EMPTY LOOP', 1);
     }
     if (headsStr) {                                   /* playheads: dashed verticals + number */
@@ -1311,7 +1311,9 @@ globalThis.tick = function () {
     }
     if (view !== 'main' && now() >= viewUntil) { view = 'main'; dirty = true; }
     if (view === 'wave') {
-        if (tickCount % 12 === 0) { const w = gp('wave'); if (w) waveStr = w; }
+        /* Poll every tick while waiting on a fresh slot (the worker answers within ~20 ms),
+         * every 12th otherwise. '' = empty slot, and it must land (a truthy test kept the old wave). */
+        if (waveStr === null || tickCount % 12 === 0) { const w = gp('wave'); if (w != null) waveStr = w; }
         const h = gp('heads'); if (h) headsStr = h;
         if (tickCount % 12 === 5) { const a = parseFloat(gp('v_start')); if (!isNaN(a)) waveStart = a;
                                     const b = parseFloat(gp('v_end'));   if (!isNaN(b)) waveEnd = b; }
@@ -1335,6 +1337,7 @@ function selectTrack(i) {
     if (i === sel) return;
     setLED(MoveSteps[sel], DarkGrey, true);
     sel = i; spCmd('sel:' + i);
+    waveStr = null; headsStr = '';   /* null = waiting for this slot's wave: draw nothing, never the old loop's */
     setLED(MoveSteps[sel], White, true);
     needReload = true;
 }

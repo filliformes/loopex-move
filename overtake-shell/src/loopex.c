@@ -483,7 +483,9 @@ typedef struct {
     float selfDcXL, selfDcYL, selfDcXR, selfDcYR;       /* ...and across the Self (own-output) loop */
     int drSilent; float drBleed;   /* abandoned-tail silence bleed */
     Biquad eqLoSh, eqMidPk, eqHiSh, eqBw[3]; double eqBwHz;
-    int eqPoles; double loOneL, loOneR, hiOneL, hiOneR, loOneK, hiOneK;   /* Output filter cascade */ int eqCrush, eqBits, eqClip, eqCompand; float eqSat, eqAsym, eqMakeup;
+    int eqPoles; double loOneL, loOneR, hiOneL, hiOneR, loOneK, hiOneK;   /* Output filter cascade */
+    double glueAtk, glueRel, glueKnee, glueDist, limCeil;   /* era-matched dynamics per voicing */
+    double glueThrust, thrLpL, thrLpR, thrK;                /* API THRUST sidechain tilt */ int eqCrush, eqBits, eqClip, eqCompand; float eqSat, eqAsym, eqMakeup;
     double adaaUL, adaaUR, adaaFL, adaaFR;   /* ADAA history for the Character saturator */
     uint32_t outDitRng;                      /* TPDF dither for the final 16-bit output */ double eqCrushHoldL,eqCrushHoldR; int eqCrushCnt;
     double glueEnvL,glueEnvR, tapeLimEnv;
@@ -1961,7 +1963,36 @@ static const char *meq_opts[MEQ_N] = { "Off","962","Air","SSL","Neve","Trident",
  *       DOCUMENTED: Neve 1073 HPF 18 dB/oct, SSL (Origin, '242-derived) HPF 18 dB/oct,
  *       Focusrite ISA 110 HPF and LPF both 18 dB/oct, API 550b/560 12 dB/oct, Akai S950
  *       6-pole 36 dB/oct MF6CN. Trident publish no slope (Softube's emulation says ~12),
- *       and the tape machines and E-mus publish none either - those stay at 2. */
+ *       and the tape machines and E-mus publish none either - those stay at 2.
+ * glueAtk/glueRel/glueKnee/glueDist: the Output compressor behaves like the dynamics unit the
+ *       SAME maker built in the SAME era, since most of these consoles have no compressor of
+ *       their own. Neve 1073 -> 33609 (the 2254 diode bridge as a stereo bus box): 3 ms, Auto
+ *       release, soft knee reaching full ratio +6 dB over threshold, and THD that RISES with
+ *       gain reduction - 0.075%% bypassed, 0.2%% compressing, 0.45%% limiting. That last figure
+ *       is what glueDist models, and Neve is the only maker here who publishes it.
+ *       Focusrite ISA 110 -> ISA 130 (VCA, documented soft knee, NO auto mode).
+ *       API 550A -> API 2500 bus compressor. NOTE this pairing is by FUNCTION, not era: the
+ *       550A is 1967 and the 2500 is 2000s, unlike Neve->33609 or ISA 110->ISA 130 which are
+ *       genuine contemporaries. Chosen because it is the API bus compressor people actually
+ *       use, and because it is exhaustively documented. Attack 3 ms and release 200 ms are
+ *       real switch positions. glueDist is 0.00 and that is a FINDING, not laziness: no
+ *       independent THD-under-gain-reduction measurement of a 2500 exists anywhere, and a
+ *       THAT-2180 VCA bus compressor is supposed to stay clean, so inventing grit for it
+ *       would be fiction. Knee width in dB is unpublished by API - 6 dB is a choice.
+ * thrust: API's patented THRUST sidechain filter (US 5,170,437), the one mechanism nothing
+ *       else here has. It tilts the signal feeding the DETECTOR - not the audio - by
+ *       +10 dB/decade, -15 dB at 20 Hz to +15 dB at 20 kHz, pivoting near 632 Hz. Bass
+ *       therefore stops driving the gain reduction, which is why an API keeps its low end
+ *       while compressing. Modelled as a first-order tilt, an approximation of the patent's
+ *       five-stage RC ladder.
+ *       Studer -> its own desk limiter (PDM/VCA, program-dependent release).
+ *       Trident -> CB9146 (FET). NOTE: every CB9146 figure is a forum reading of a panel
+ *       photograph - no manufacturer documentation exists - so treat it as the weakest row.
+ *       Ampex made no compressor, and neither did E-mu or Akai in this era: confirmed, so the
+ *       tape and sampler rows get class-appropriate timings rather than a borrowed unit.
+ * limCeil: where Limit starts working, following each unit's documented headroom (API clips
+ *       at +30 dBm, highest here; Ampex is the most gradual at 0.3%% -> 3%% over +9 VU). The
+ *       KNEE follows `clip`, so converters rail where consoles and tape bend. */
 /* bits: converter word length, 0 = none (only the 12-bit samplers quantise).
  * clip: 0 = soft tanh (valve, transformer, tape), 1 = hard (a converter has a rail).
  * compand: quantise on a mu-law curve rather than linearly. The MPC60's service manual calls
@@ -2002,33 +2033,33 @@ static const char *meq_opts[MEQ_N] = { "Off","962","Air","SSL","Neve","Trident",
  * voicings and nowhere else; the console and tape models stay clean, because a console has no
  * interpolator to be dirty with. */
 
-static const double MEQ_DEF[MEQ_N][17] = {
+static const double MEQ_DEF[MEQ_N][23] = {
 
-    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 , 0.00,     0,0,0.00,0,0,2 },   /* Off — bypassed */
+    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 , 0.00,     0,0,0.00,0,0,2,10,250, 6,0.00,0.90,0.00 },   /* Off — bypassed */
 
-    {  40,-0.5,    0, 0.0,0.7, 16000,-0.7, 0.03,     0, -0.1 , 0.00,     0,0,0.00,0,0,2 },   /* Studer 961/962 desk — transparent by design (see note) */
+    {  40,-0.5,    0, 0.0,0.7, 16000,-0.7, 0.03,     0, -0.1 , 0.00,     0,0,0.00,0,0,2,3,250, 4,0.00,0.94,0.00 },   /* Studer 961/962 desk — transparent by design (see note) */
 
-    {  95, 1.0, 2200,-0.8,0.8, 15000, 3.0, 0.06,     0, -0.6 , 0.00,     0,0,0.10,0,0,3 },   /* Air — ISA 110: 95/15k are reported shelf points; 2.2k inside its 600-6k band */
+    {  95, 1.0, 2200,-0.8,0.8, 15000, 3.0, 0.06,     0, -0.6 , 0.00,     0,0,0.10,0,0,3,5,400, 8,0.00,0.94,0.00 },   /* Air — ISA 110: 95/15k are reported shelf points; 2.2k inside its 600-6k band */
 
-    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 , 0.00,     0,0,0.05,0,0,3 },   /* SSL bus — tight lows, present mids */
+    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 , 0.00,     0,0,0.05,0,0,3,3,300, 5,0.00,0.92,0.00 },   /* SSL bus — tight lows, present mids */
 
-    { 110, 2.5,  700,-1.0,0.7, 12000, 3.5, 0.14,     0, -1.8 , 0.00,     0,0,0.08,0,0,3 },   /* Neve 1073 — 110 Hz/700 Hz/12 kHz are documented points; 3rd-harmonic dominant */
+    { 110, 2.5,  700,-1.0,0.7, 12000, 3.5, 0.14,     0, -1.8 , 0.00,     0,0,0.08,0,0,3,3,400, 6,0.35,0.90,0.00 },   /* Neve 1073 — 110 Hz/700 Hz/12 kHz are documented points; 3rd-harmonic dominant */
 
-    {  80, 1.5, 1000, 1.5,1.3, 12000, 2.0, 0.16,     0, -1.2 , 0.00,     0,0,0.10,0,0,2 },   /* Trident A-Range — 80 Hz/1 kHz/12 kHz documented; Q 1.3; asym NOT documented */
+    {  80, 1.5, 1000, 1.5,1.3, 12000, 2.0, 0.16,     0, -1.2 , 0.00,     0,0,0.10,0,0,2,1,200, 2,0.15,0.90,0.00 },   /* Trident A-Range — 80 Hz/1 kHz/12 kHz documented; Q 1.3; asym NOT documented */
 
-    {  60, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00,     0,0,0.10,0,0,2 },   /* Studer A800 — head bump ~60 Hz (measured siblings); Studer specs 3rd harmonic */
+    {  60, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00,     0,0,0.10,0,0,2,30,600,10,0.00,0.85,0.00 },   /* Studer A800 — head bump ~60 Hz (measured siblings); Studer specs 3rd harmonic */
 
-    { 100, 1.0,  800, 2.5,1.1,  7000, 1.0, 0.20,     0, -1.6 , 0.00,     0,0,0.10,0,0,2 },   /* API 550A — 100/800/7k are documented switch points; prop-Q not modelled */
+    { 100, 1.0,  800, 2.5,1.1,  7000, 1.0, 0.20,     0, -1.6 , 0.00,     0,0,0.10,0,0,2,    3,200, 6,0.00,0.96,1.00 },   /* API 550A — 100/800/7k documented; dynamics from the 2500 bus comp (see note) */
 
-    {  70, 2.0,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00,     0,0,0.12,0,0,2 },   /* Ampex ATR-102 — LF within its documented +/-2 dB bound; even-order is 1/3 of 3rd */
+    {  70, 2.0,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00,     0,0,0.12,0,0,2,35,700,12,0.00,0.82,0.00 },   /* Ampex ATR-102 — LF within its documented +/-2 dB bound; even-order is 1/3 of 3rd */
 
-    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 40000, -1.2 , 0.25,    12,1,0.00,1,18000,2 },   /* MPC60 — 40 kHz, 16-bit conv + companded 12-bit, real 18 kHz output filter */
+    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 40000, -1.2 , 0.25,    12,1,0.00,1,18000,2,10,250, 6,0.00,0.98,0.00 },   /* MPC60 — 40 kHz, 16-bit conv + companded 12-bit, real 18 kHz output filter */
 
-    {  90, 0.5, 1200, 0.0,0.8, 12000,-1.0, 0.26, 25000, -1.0 , 0.60,    12,1,0.00,0,10000,6 },   /* Akai S950 - 12-bit LINEAR (no companding); 6-pole MF6CN recon filter at fc = fs*0.4 */
+    {  90, 0.5, 1200, 0.0,0.8, 12000,-1.0, 0.26, 25000, -1.0 , 0.60,    12,1,0.00,0,10000,6,10,250, 6,0.00,0.98,0.00 },   /* Akai S950 - 12-bit LINEAR (no companding); 6-pole MF6CN recon filter at fc = fs*0.4 */
 
-    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26040, -1.0 , 1.00,    12,1,0.00,0,0,2 },   /* SP-1200 — 26.04 kHz, 12-bit linear, NO recon filter, drop-sample */
+    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26040, -1.0 , 1.00,    12,1,0.00,0,0,2,10,250, 6,0.00,1.00,0.00 },   /* SP-1200 — 26.04 kHz, 12-bit linear, NO recon filter, drop-sample */
 
-    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 26040, -0.6 , 1.00,    12,1,0.00,0,0,2 },   /* Emu SP-12 — same 26.04 kHz clock; darker fixed output filters */
+    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 26040, -0.6 , 1.00,    12,1,0.00,0,0,2,10,250, 6,0.00,1.00,0.00 },   /* Emu SP-12 — same 26.04 kHz clock; darker fixed output filters */
 
 };
 
@@ -2054,6 +2085,11 @@ static void master_eq_update(loopex_t *s){
     s->eqCompand=(d[14]>0.5)?1:0;
     s->eqBwHz=d[15];
     s->eqPoles=(int)(d[16]+0.5); if(s->eqPoles<2)s->eqPoles=2; if(s->eqPoles>6)s->eqPoles=6;
+    s->glueAtk=d[17]*0.001; s->glueRel=d[18]*0.001; s->glueKnee=d[19];
+    s->glueDist=d[20];      s->limCeil=d[21];
+    if(s->glueAtk<1e-6)s->glueAtk=1e-6; if(s->glueRel<1e-4)s->glueRel=1e-4;
+    if(s->limCeil<0.5)s->limCeil=0.90;
+    s->glueThrust=d[22]; s->thrK=1.0-exp(-TWOPI*632.0/SR);   /* 632 Hz = the THRUST pivot */
     if(s->eqBwHz>100.0){   /* 6th-order Butterworth = three biquads at these Q's */
         static const double BQ[3]={0.51763809,0.70710678,1.93185165};
         double f=s->eqBwHz; if(f>SR*0.45)f=SR*0.45;
@@ -2116,8 +2152,14 @@ static inline void master_glue(loopex_t *s, double *l, double *r){
     if(s->masterGlue<0.01f) return;
 
     double amt=(double)s->masterGlue, det=fmax(fabs(*l),fabs(*r));
+    if(s->glueThrust>0.001){   /* THRUST: tilt what the DETECTOR hears, not the audio. */
+        double m=0.5*(*l+*r);
+        s->thrLpL += (m - s->thrLpL)*s->thrK;          /* one-pole at the 632 Hz pivot */
+        double hi=m - s->thrLpL;
+        double tl=fabs(hi*2.37 + s->thrLpL*0.42);      /* +/-7.5 dB first-order tilt */
+        det += (tl - det)*s->glueThrust; }
 
-    double atk=exp(-1.0/(SR*0.010)), rel=exp(-1.0/(SR*0.25));   /* 10ms / 250ms glue */
+    double atk=exp(-1.0/(SR*s->glueAtk)), rel=exp(-1.0/(SR*s->glueRel));   /* era-matched */
 
     double env=fmax(s->glueEnvL,s->glueEnvR);
 
@@ -2127,11 +2169,24 @@ static inline void master_glue(loopex_t *s, double *l, double *r){
 
     double thDb=-12.0*amt, db=20.0*log10(env+1e-9), ratio=1.5+amt*2.5;
 
-    double g=1.0; if(db>thDb){ double gr=(db-thDb)*(1.0-1.0/ratio); g=pow(10.0,-gr/20.0); }
+    /* Soft knee. The Neve 33609 reaches full ratio about 6 dB above threshold, the only
+     * knee width anyone here publishes; API's 525 has no knee control at all. */
+    double over=db-thDb, kn=s->glueKnee, slope=1.0-1.0/ratio, grDb=0.0;
+    if(kn>0.01){ if(over>=kn) grDb=(over-kn*0.5)*slope;
+                 else if(over>0.0) grDb=(over*over/(2.0*kn))*slope; }
+    else if(over>0.0) grDb=over*slope;
+    double g=pow(10.0,-grDb/20.0);
 
     double mk=pow(10.0,(-thDb)*(1.0-1.0/ratio)*0.45/20.0*amt);
 
     *l*=g*mk; *r*=g*mk;
+    /* Diode-bridge grit. AMS Neve publish the 33609's THD per mode - 0.075% bypassed,
+     * 0.2% compressing, 0.45% limiting - distortion that rises WITH gain reduction. Nobody
+     * else here publishes a figure under GR, so only the diode-bridge and FET rows carry
+     * this; the VCA voicings stay clean, which is what a VCA does. */
+    if(s->glueDist>0.001 && grDb>0.05){
+        double d=s->glueDist*(grDb/10.0); if(d>s->glueDist)d=s->glueDist;
+        *l+=(lb_tanh(*l*1.6)*0.92-*l)*d; *r+=(lb_tanh(*r*1.6)*0.92-*r)*d; }
 
 }
 
@@ -2145,9 +2200,14 @@ static inline void tape_limiter(loopex_t *s, double *l, double *r){
     double det=fmax(fabs(*l),fabs(*r))*drv;
     const double atk=0.9285, rel=0.99977;
     s->tapeLimEnv = (det>s->tapeLimEnv)? atk*s->tapeLimEnv+(1.0-atk)*det : rel*s->tapeLimEnv+(1.0-rel)*det;
-    const double ceil=0.90; double gr=(s->tapeLimEnv>ceil)? ceil/s->tapeLimEnv:1.0;
+    /* Ceiling follows documented headroom (API clips at +30 dBm, highest here; the ATR-102
+     * is most gradual at 0.3% -> 3% over +9 VU). KNEE follows `clip`: a converter has a
+     * rail, a console or tape machine bends. */
+    double ceil=s->limCeil; double gr=(s->tapeLimEnv>ceil)? ceil/s->tapeLimEnv:1.0;
     double nrm=1.0/fmax(1.0, lb_tanh(drv)*1.287);             /* no upward makeup; output stays <= 1 */
-    *l=lb_tanh(*l*drv*gr)*nrm; *r=lb_tanh(*r*drv*gr)*nrm;
+    if(s->eqClip && s->masterEQ>MEQ_OFF){
+        *l=lb_clampd(*l*drv*gr,-ceil,ceil); *r=lb_clampd(*r*drv*gr,-ceil,ceil); }
+    else { *l=lb_tanh(*l*drv*gr)*nrm; *r=lb_tanh(*r*drv*gr)*nrm; }
 }
 
 

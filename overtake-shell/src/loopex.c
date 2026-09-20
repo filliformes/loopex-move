@@ -421,7 +421,7 @@ typedef struct {
     float qInL[PS_NQ][128], qInR[PS_NQ][128], qOutL[PS_NQ][128], qOutR[PS_NQ][128];
     atomic_long qSub, qDone;          /* blocks submitted / finished, exclusive upper bounds */
     long psEngBlock;                  /* block the current engagement started on */
-    float psSemiReq, psSemiApplied;   /* semitones: requested by the callback, applied by the worker */
+    _Atomic float psSemiReq; float psSemiApplied;   /* semitones: stored by the callback, applied by the worker (atomic: it crosses threads) */
     int psLate; long psLateCount; double psReady;   /* result missing -> ride to dry over ~3 ms; count for the profile */
     double pitchPow; float pitchPowCache;          /* pow(2,pitch): recomputed only when Pitch moves */
     double panL_c, panR_c; float panTrigCache;     /* pan law cos/sin: only when smoothed pan moves */
@@ -698,8 +698,10 @@ static int wave_compute(Voice *v, char *buf){
  * result is missing it keeps the previous one and rides to dry (voice_render). A worker
  * more than PS_NQ-4 blocks behind drops the backlog: the callback has been riding dry
  * for 30 ms by then, and stale audio through the shifter helps nobody. */
+static inline void lb_enable_ftz(void);   /* FPCR.FZ is PER THREAD: every worker that does float math needs it */
 static void *ps_worker(void *arg){
     loopex_t *s=(loopex_t*)arg;
+    lb_enable_ftz();   /* the phase vocoder's bins decay to denormals on silent loops: without this the worker crawls and misses deadlines */
     while(1){
         sem_wait(&s->psSem);
         if(atomic_load(&s->psCancel)) break;
@@ -708,7 +710,7 @@ static void *ps_worker(void *arg){
             long done=atomic_load_explicit(&v->qDone,memory_order_relaxed);
             if(sub-done>PS_NQ-4) done=sub-1;
             while(done<sub){ int sl=(int)(done%PS_NQ);
-                float semi=v->psSemiReq; if(semi!=v->psSemiApplied){ ps_set_semitones(v->ps,semi); v->psSemiApplied=semi; }
+                float semi=atomic_load_explicit(&v->psSemiReq,memory_order_relaxed); if(semi!=v->psSemiApplied){ ps_set_semitones(v->ps,semi); v->psSemiApplied=semi; }
                 memcpy(v->qOutL[sl],v->qInL[sl],sizeof v->qOutL[sl]); memcpy(v->qOutR[sl],v->qInR[sl],sizeof v->qOutR[sl]);
                 ps_process(v->ps,v->qOutL[sl],v->qOutR[sl],128);
                 done++; atomic_store_explicit(&v->qDone,done,memory_order_release); }
@@ -731,6 +733,7 @@ static void prof_dump(loopex_t *s){
 }
 static void *session_worker(void *arg){
     loopex_t *s=(loopex_t*)arg;
+    lb_enable_ftz();   /* per-thread; the Disintegration pass runs double-precision filters here */
     char dir[256],path[352];
     while(1){
         while(!atomic_load(&s->sio.request)&&!atomic_load(&s->sio.cancel)&&!atomic_load(&s->undoReq)&&!atomic_load(&s->disintReq)&&!atomic_load(&s->waveReq)
@@ -1713,7 +1716,7 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
       if(want&&!v->psActive&&v->ps){ v->psActive=1; v->psWarm=0; v->psMix=0.0; v->psLat=ps_latency(v->ps)+128*(PS_D+1); v->psCache=-99.0f;
           v->psEngBlock=s->blockNo; v->psLate=0; v->psReady=1.0; }
       if(v->psActive){
-        if(v->clock!=v->psCache&&want){ v->psSemiReq=v->clock*12.0f; v->psCache=v->clock; }   /* the worker applies it */
+        if(v->clock!=v->psCache&&want){ atomic_store_explicit(&v->psSemiReq,v->clock*12.0f,memory_order_relaxed); v->psCache=v->clock; }   /* the worker applies it */
         v->psInL[n]=(float)rawL; v->psInR[n]=(float)rawR;
         double target=0.0;
         if(want){ if(v->psWarm<v->psLat){ v->psWarm++; if(v->psWarm==v->psLat) v->psNudge=v->psLat; } else target=1.0; }

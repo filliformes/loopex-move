@@ -1049,13 +1049,21 @@ static inline int punch_grain(PunchSlot *ps, double pos, double dur, double rate
 }
 /* Sum the active grains (Hann windows). */
 static inline void punch_grains_out(PunchSlot *ps, double *sl, double *sr){
-    double l=0.0,r=0.0; int n=0;
+    double l=0.0,r=0.0, wsq=0.0;
     for(int i=0;i<PUNCH_GRAINS;i++){ if(!ps->gAct[i])continue; double wph=ps->gAge[i]/ps->gDur[i]; if(wph>=1.0){ps->gAct[i]=0;continue;}
         double win=0.5-0.5*cos(TWOPI*wph), rp=ps->gPos[i]+ps->gAge[i]*ps->gRate[i];
-        l+=(double)ring_read(ps->ringL,rp)*win*ps->gGl[i]; r+=(double)ring_read(ps->ringR,rp)*win*ps->gGr[i]; ps->gAge[i]+=1.0; n++; }
+        l+=(double)ring_read(ps->ringL,rp)*win*ps->gGl[i];
+        r+=(double)ring_read(ps->ringR,rp)*win*ps->gGr[i];
+        wsq+=win*win; ps->gAge[i]+=1.0; }
     /* Grains are mutually incoherent, so they sum in POWER: normalise by sqrt(n) or Density
      * would read as a loudness control. Deeper pool = denser cloud at the same level. */
-    if(n>1){ double g=1.0/sqrt((double)n); l*=g; r*=g; }
+    /* Normalise by the summed window POWER, not the grain COUNT. A count steps by one
+     * every time a grain is born or dies, which stepped the gain of the whole sum
+     * discontinuously - at the densities the deeper pool now reaches that is a constant
+     * stream of clicks. sum(win^2) is continuous because the Hann windows fade in and
+     * out. Floored at 1.0 so this only ever attenuates a stack, never boosts a lone
+     * grain or blows up when every window happens to sit near its edges. */
+    if(wsq>1.0){ double g=1.0/sqrt(wsq); l*=g; r*=g; }
     *sl=l; *sr=r;
 }
 /* per-sample: one slot reads its own ring and produces wet (ring already written by caller).
@@ -1113,7 +1121,18 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
         double pr=pm;
         ps->gSched+=dens/SR;
         if(ps->gSched>=1.0){ ps->gSched-=1.0; if(ps->gSched>1.0)ps->gSched=0.0;
-            double back=dur*(0.5+(pr>1.0?pr:1.0))+PRND(ps->gRng)*dur*3.0; double pos=(double)ps->w-back;   /* room for the whole read, even pitched up */
+            double back=dur*(0.5+(pr>1.0?pr:1.0))+PRND(ps->gRng)*dur*3.0;
+            /* Keep the whole grain inside the ring AND behind the write head. Smear's grains
+             * reach 0.8 s and its random offset multiplies that by up to 4.5, asking for a
+             * read 158k samples back when PUNCH_BUF is only 88200 - so the position wrapped
+             * past w into audio about to be overwritten, and clicked on every wrap. Haze
+             * fitted, but with 3%% to spare. Clamp both ends: far enough back that the grain
+             * never catches w, near enough that it never outruns the buffer. */
+            { double trav=dur*((pr>1.0)?pr:1.0);
+              double minB=trav+64.0, maxB=(double)PUNCH_BUF-trav-256.0;
+              if(maxB<minB) maxB=minB;
+              if(back<minB) back=minB; else if(back>maxB) back=maxB; }
+            double pos=(double)ps->w-back;
             double pan=(PRND(ps->gRng)*2.0-1.0)*(smear?0.9:0.6);
             double rate=pr; if(smear&&PRND(ps->gRng)<0.5){ rate=-pr; pos+=dur*rate*-1.0; }   /* reversed grains land ahead of their read */
             punch_grain(ps,pos,dur,rate,pan);
@@ -1317,7 +1336,10 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         v->glLastSlice=-1;   /* Seed: don't let the slice tracker overwrite our crossfade */
     }
     double rate=pow(2.0,(double)v->pitch)*s->tapeSpd;if(v->reverse>0.5f)rate=-rate;
-    if(s->scanTimer>0)rate*=3.5;   /* Perform: Scan gesture (fast sweep) */
+    /* Perform: Scan - a tape fast-forward, so pitch rides with speed. 2.0x is exactly one
+     * octave; the old 3.5x was 1.807 octaves, landing 2.3 semitones short of two and
+     * reading as a near-miss rather than a deliberate interval. */
+    if(s->scanTimer>0)rate*=2.0;
     /* head 0 mode/speed */
     { Playhead *P0=&v->ph[0];
       if(P0->spd!=P0->spdCache){ P0->mult=0.25*pow(16.0,(double)P0->spd); P0->spdCache=P0->spd; }

@@ -175,11 +175,17 @@ static inline void lb_loop_read(const int16_t *bl, const int16_t *br, int L, dou
     int i2=i1+1; if(i2>=L)i2-=L;
     double hl=lb_hermite((double)bl[im1],(double)bl[i0],(double)bl[i1],(double)bl[i2],f);
     double hr=lb_hermite((double)br[im1],(double)br[i0],(double)br[i1],(double)br[i2],f);
-    if(g_interpGrit>0.001f){                    /* crossfade toward a vintage sampler's linear read */
+    if(g_interpGrit>0.001f){
+        /* Hermite -> linear -> DROP-SAMPLE. The SP-12/SP-1200 read the wavetable with a
+         * fractional increment and simply truncate it - no interpolation at all (measured,
+         * Yeh/Nolting/Smith CCRMA 2007). Pitching down repeats samples outright, which is
+         * cruder than linear and is exactly why those machines bite when slowed. */
         double g=(double)g_interpGrit;
         double ll=(double)bl[i0]+((double)bl[i1]-(double)bl[i0])*f;
         double lr=(double)br[i0]+((double)br[i1]-(double)br[i0])*f;
-        hl+=(ll-hl)*g; hr+=(lr-hr)*g; }
+        if(g<=0.5){ double k=g*2.0; hl+=(ll-hl)*k; hr+=(lr-hr)*k; }
+        else{ double k=(g-0.5)*2.0;
+              hl=ll+((double)bl[i0]-ll)*k; hr=lr+((double)br[i0]-lr)*k; } }
     *l=hl/32768.0; *r=hr/32768.0;
 }
 
@@ -474,10 +480,11 @@ typedef struct {
     float *drL[4], *drR[4]; int drLen[4]; int drW[4];
     double drPh[4]; float drDL[4], drDR[4]; double drInEnv;
     float drDcXL[4], drDcYL[4], drDcXR[4], drDcYR[4];   /* DC blockers in each Drift feedback line */
-    uint32_t outDitRng;                                 /* TPDF dither for the final 16-bit output */
     float selfDcXL, selfDcYL, selfDcXR, selfDcYR;       /* ...and across the Self (own-output) loop */
     int drSilent; float drBleed;   /* abandoned-tail silence bleed */
-    Biquad eqLoSh, eqMidPk, eqHiSh; int eqCrush; float eqSat, eqMakeup; double eqCrushHoldL,eqCrushHoldR; int eqCrushCnt;
+    Biquad eqLoSh, eqMidPk, eqHiSh, eqBw[3]; double eqBwHz; int eqCrush, eqBits, eqClip, eqCompand; float eqSat, eqAsym, eqMakeup;
+    double adaaUL, adaaUR, adaaFL, adaaFR;   /* ADAA history for the Character saturator */
+    uint32_t outDitRng;                      /* TPDF dither for the final 16-bit output */ double eqCrushHoldL,eqCrushHoldR; int eqCrushCnt;
     double glueEnvL,glueEnvR, tapeLimEnv;
     double compEnvL,compEnvR,casLpL,casLpR;uint32_t rng;
     double cpuPct;   /* smoothed render_block load, % of block budget (Overtake CPU meter) */
@@ -709,6 +716,41 @@ static void voice_antiimage(Voice *v, int k, double rate, double *outL, double *
     double fL=bq_L(&v->aiLp[k],*outL), fR=bq_R(&v->aiLp[k],*outR);
     double g=(double)g_interpGrit;              /* grit 1.0 -> filter fully out, images intact */
     *outL+=(fL-*outL)*(1.0-g); *outR+=(fR-*outR)*(1.0-g);
+}
+
+/* ---- First-order ADAA for the Character saturator ----------------------------------
+ * A memoryless shaper at 44.1 k folds its own harmonics back as INHARMONIC grit, and that
+ * grit sounds much the same whichever shaper made it - which is precisely what blurs one
+ * Character into another. Integrating the shaper across each sample interval,
+ *     y = (F(u1) - F(u0)) / (u1 - u0),
+ * removes most of it, leaving the voicing's own signature: 2nd vs 3rd order, knee vs rail.
+ * Only the MASTER stage is treated here: one stereo instance, so the transcendentals are
+ * affordable. The per-voice shaper family would need the LUT variant to be worth it.
+ * Deliberately NOT applied to master_clock's SR-crush, stumble or dropout - those alias on
+ * purpose and it is the entire point of them. */
+/* mu-law companding quantiser: compress, quantise linearly in the compressed domain, expand.
+ * Noise then tracks the signal instead of sitting at a fixed floor - audibly unlike linear
+ * 12-bit, and the reason Akai could claim lower noise than a 12-bit linear machine. */
+static inline double lb_mulaw_quant(double x, double q){
+    const double MU=255.0, K=5.5451774444795625;   /* K = log(1+MU) */
+    double sg=(x<0.0)?-1.0:1.0, a=fabs(x); if(a>1.0)a=1.0;
+    double c=log1p(MU*a)/K;
+    c=floor(c*q+0.5)/q;
+    return sg*(expm1(K*c)/MU);
+}
+#define ADAA_EPS 1e-5
+static inline double adaa_F_clip(double u){ double a=fabs(u); return (a<=1.0)? 0.5*u*u : a-0.5; }
+static inline double adaa_F_tanh(double u){ double a=fabs(u); return a+log1p(exp(-2.0*a))-0.69314718055994531; }
+static inline double adaa_run(double u1, double *u0, double *F0, int hard){
+    double F1 = hard? adaa_F_clip(u1) : adaa_F_tanh(u1);
+    double d = u1-*u0, y;
+    if(fabs(d)<ADAA_EPS){        /* 0/0: the quotient has lost every significant digit here.
+                                  * Without this fallback the division noise on quiet passages
+                                  * is louder than the aliasing it set out to remove. */
+        double m=0.5*(u1+*u0);
+        y = hard? lb_clampd(m,-1.0,1.0) : tanh(m);
+    } else y=(F1-*F0)/d;
+    *u0=u1; *F0=F1; return y;
 }
 
 /* Studer 961/962 "Faecherentzerrer" (fan equaliser) of the 1.960.221 mono input unit.
@@ -1896,15 +1938,50 @@ static inline void perf_pump(loopex_t *s, double *l, double *r){
 
  * the spirit of the named units, not measured curves. */
 
-/* Display order: transparent -> console colour -> tape -> lo-fi samplers (the gritty end).
+/* Display order is a GRITTINESS RAMP: bypass, then the analogue voicings ordered by how hard
+ * they saturate (962 0.03 -> Ampex 0.40), then the samplers by how harsh their converter is
+ * (MPC60 30 kHz -> SP-1200 26 kHz -> Emu SP 22 kHz). The knob sweeps transparent to destroyed.
  * Sessions store the NAME, not this index, so the list can be reordered freely; legacy
  * sessions that stored a raw index are remapped in set_param. */
-enum { MEQ_OFF=0, MEQ_962, MEQ_CONSOLE, MEQ_NEVE, MEQ_SSL, MEQ_API, MEQ_STUDER, MEQ_AMPEX, MEQ_JUNO, MEQ_SP12, MEQ_MPC, MEQ_EMU, MEQ_N };
+enum { MEQ_OFF=0, MEQ_962, MEQ_AIR, MEQ_SSL, MEQ_NEVE, MEQ_TRIDENT, MEQ_STUDER, MEQ_API, MEQ_AMPEX, MEQ_MPC, MEQ_S950, MEQ_SP12, MEQ_EMU, MEQ_N };
 _Static_assert(MEQ_962==1, "create_instance defaults masterEQ to the literal 1");
 
-static const char *meq_opts[MEQ_N] = { "Off","962","Console","Neve","SSL","API","Studer","Ampex","Juno","SP12","MPC","Emu" };
+static const char *meq_opts[MEQ_N] = { "Off","962","Air","SSL","Neve","Trident","Studer","API","Ampex","MPC","S950","SP12","Emu" };
 
-/* {loHz,loDb, midHz,midDb,midQ, hiHz,hiDb, sat, crushHz(0=none), makeupDb, grit} */
+/* {loHz,loDb, midHz,midDb,midQ, hiHz,hiDb, sat, crushHz(0=none), makeupDb, grit, bits, clip, asym, compand, bwHz} */
+/* bwHz: RECONSTRUCTION-FILTER ceiling, 0 = none. Documented for all four samplers, so this
+ *       is fact rather than voicing: the E-mus have NO recon filter at all (bare zero-order
+ *       hold - the imaging is the sound), the MPC60 has a real 20 Hz-18 kHz output path, and
+ *       the S950 runs a 6-pole 36 dB/oct MF6CN switched-capacitor filter whose cutoff the
+ *       firmware locks to fc = fs*0.4 (Akai service manual voice block diagram). Built here
+ *       as 3 cascaded biquads = 6th-order Butterworth. */
+/* bits: converter word length, 0 = none (only the 12-bit samplers quantise).
+ * clip: 0 = soft tanh (valve, transformer, tape), 1 = hard (a converter has a rail).
+ * compand: quantise on a mu-law curve rather than linearly. The MPC60's service manual calls
+ *       its format "12 bit sample resolution, special non-linear format, reduced noise" -
+ *       companded, so its quantisation noise scales with signal instead of sitting at a fixed
+ *       floor. Akai never say WHICH law, so mu-law (mu=255) is MY CHOICE: period-correct and
+ *       it behaves as they describe. The E-mus are documented 12-bit LINEAR and stay at 0.
+ * asym: 0..1 even-harmonic content from an asymmetric transfer - what "warmth" actually is.
+ *       NOTE: transformer-coupled does NOT imply even-harmonic. Sound On Sound's bench
+ *       measurement of a 1073N found the Neve THIRD-harmonic dominant, so its asym is low
+ *       despite the Marinair/LO1166 transformers. Where a unit's harmonic order is not
+ *       documented (Trident A-Range), asym is left modest and that gap is recorded here
+ *       rather than guessed at. After researching all of these: NO manufacturer states the
+ *       harmonic order behind any of its THD figures. The Neve is the single exception, via
+ *       an independent bench measurement. So asym is deliberately NOT used as a big
+ *       differentiator - doing that would be inventing character the sources do not support.
+ *       Three independent confirmations that the folk premise is wrong: Sound On Sound measured
+ *       the Neve 1073 THIRD-harmonic dominant; Studer specify the A800's THD explicitly as 3rd
+ *       and publish no even-order figure at all; Ampex document the ATR-102 at <0.3% 3rd but
+ *       <0.1% even-order at reference. Transformers and tape do NOT imply even harmonics.
+ * `Air` = Focusrite ISA 110, the EQ Rupert Neve designed in 1985 for the Focusrite Studio
+ * Console built for AIR Studios Montserrat - hence the name, and hence the nickname its top
+ * end still carries. Voiced for what that range is known for: an HF shelf higher than anything
+ * else here (the ISA's shelf switches 8/12/16 kHz - this takes 16), a little upper-mid relief
+ * so it reads open rather than forward, a firm-but-not-fat LF near the ISA's 110 Hz shelf
+ * point, and modest even-harmonic content from its Lundahl input transformer. Unlike the 962
+ * this is a clean-room voicing in the spirit of the unit, NOT fitted to measured curves. */
 /* `962` = the Studer 961/962 mixing DESK, per its service manual 1.7.2: response
  * +0.5/-1 dB, -3 dB at 4.5 Hz and 45 kHz, THD <0.03% at +6 dBu, EIN <=-125 dBu. A
  * broadcast desk built to be transparent, so it is voiced as almost nothing: a touch of
@@ -1918,33 +1995,37 @@ static const char *meq_opts[MEQ_N] = { "Off","962","Console","Neve","SSL","API",
  * voicings and nowhere else; the console and tape models stay clean, because a console has no
  * interpolator to be dirty with. */
 
-static const double MEQ_DEF[MEQ_N][11] = {
+static const double MEQ_DEF[MEQ_N][16] = {
 
-    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 , 0.00 },   /* Off — bypassed */
+    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 , 0.00,     0,0,0.00,0,0 },   /* Off — bypassed */
 
-    {  40,-0.5,    0, 0.0,0.7, 16000,-0.7, 0.03,     0, -0.1 , 0.00 },   /* Studer 961/962 desk — transparent by design (see note) */
+    {  40,-0.5,    0, 0.0,0.7, 16000,-0.7, 0.03,     0, -0.1 , 0.00,     0,0,0.00,0,0 },   /* Studer 961/962 desk — transparent by design (see note) */
 
-    { 130, 1.0, 1200, 0.8,0.8, 11000, 1.8, 0.16,     0, -1.2 , 0.00 },   /* Console — neutral glue colour */
+    {  95, 1.0, 2200,-0.8,0.8, 15000, 3.0, 0.06,     0, -0.6 , 0.00,     0,0,0.10,0,0 },   /* Air — ISA 110: 95/15k are reported shelf points; 2.2k inside its 600-6k band */
 
-    {  90, 2.5,  500,-1.0,0.7, 14000, 3.5, 0.14,     0, -1.8 , 0.00 },   /* Neve 1073 — warm lows, silky top */
+    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 , 0.00,     0,0,0.05,0,0 },   /* SSL bus — tight lows, present mids */
 
-    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 , 0.00 },   /* SSL bus — tight lows, present mids */
+    { 110, 2.5,  700,-1.0,0.7, 12000, 3.5, 0.14,     0, -1.8 , 0.00,     0,0,0.08,0,0 },   /* Neve 1073 — 110 Hz/700 Hz/12 kHz are documented points; 3rd-harmonic dominant */
 
-    { 100, 1.0,  900, 2.5,1.1,  6000, 1.0, 0.20,     0, -1.6 , 0.00 },   /* API — punchy mids, fast */
+    {  80, 1.5, 1000, 1.5,1.3, 12000, 2.0, 0.16,     0, -1.2 , 0.00,     0,0,0.10,0,0 },   /* Trident A-Range — 80 Hz/1 kHz/12 kHz documented; Q 1.3; asym NOT documented */
 
-    { 120, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00 },   /* Studer A800 — tape head bump + airy HF, soft sat */
+    {  60, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00,     0,0,0.10,0,0 },   /* Studer A800 — head bump ~60 Hz (measured siblings); Studer specs 3rd harmonic */
 
-    { 100, 3.5,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00 },   /* Ampex ATR — fat, saturated */
+    { 100, 1.0,  800, 2.5,1.1,  7000, 1.0, 0.20,     0, -1.6 , 0.00,     0,0,0.10,0,0 },   /* API 550A — 100/800/7k are documented switch points; prop-Q not modelled */
 
-    { 160,-0.5, 2500, 2.0,1.0, 13000, 2.0, 0.08,     0, -0.8 , 0.00 },   /* Juno chorus-console — bright, glassy */
+    {  70, 2.0,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00,     0,0,0.12,0,0 },   /* Ampex ATR-102 — LF within its documented +/-2 dB bound; even-order is 1/3 of 3rd */
 
-    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26000, -1.0 , 1.00 },   /* SP-1200 — 12-bit crunch, rolled top */
+    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 40000, -1.2 , 0.25,    12,1,0.00,1,18000 },   /* MPC60 — 40 kHz, 16-bit conv + companded 12-bit, real 18 kHz output filter */
 
-    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 30000, -1.2 , 0.80 },   /* MPC60 — fat 12-bit, warm */
+    {  90, 0.5, 1200, 0.0,0.8, 12000,-1.0, 0.26, 25000, -1.0 , 0.60,    12,1,0.00,0,10000 },   /* Akai S950 - 12-bit LINEAR (no companding); 6-pole MF6CN recon filter at fc = fs*0.4 */
 
-    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 22000, -0.6 , 1.00 },   /* Emu SP — dark, gritty converter */
+    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26040, -1.0 , 1.00,    12,1,0.00,0,0 },   /* SP-1200 — 26.04 kHz, 12-bit linear, NO recon filter, drop-sample */
+
+    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 26040, -0.6 , 1.00,    12,1,0.00,0,0 },   /* Emu SP-12 — same 26.04 kHz clock; darker fixed output filters */
 
 };
+
+
 
 
 static void master_eq_update(loopex_t *s){
@@ -1961,6 +2042,19 @@ static void master_eq_update(loopex_t *s){
     if(fabs(d[6])>0.05) bq_set_highshelf(&s->eqHiSh,d[5],d[6],0.7); else bq_reset(&s->eqHiSh);
 
     s->eqSat=(float)d[7];
+    s->eqBits=(d[11]>1.0)?(int)(d[11]+0.5):0;   /* 0 = no quantiser */
+    s->eqClip=(d[12]>0.5)?1:0;
+    s->eqCompand=(d[14]>0.5)?1:0;
+    s->eqBwHz=d[15];
+    if(s->eqBwHz>100.0){   /* 6th-order Butterworth = three biquads at these Q's */
+        static const double BQ[3]={0.51763809,0.70710678,1.93185165};
+        double f=s->eqBwHz; if(f>SR*0.45)f=SR*0.45;
+        for(int k=0;k<3;k++) bq_set_lp(&s->eqBw[k],f,BQ[k]); }
+    else for(int k=0;k<3;k++) bq_reset(&s->eqBw[k]);
+    s->eqAsym=(float)d[13];
+    /* the shaper just changed, so the cached antiderivative belongs to the old one */
+    s->adaaFL=s->eqClip?adaa_F_clip(s->adaaUL):adaa_F_tanh(s->adaaUL);
+    s->adaaFR=s->eqClip?adaa_F_clip(s->adaaUR):adaa_F_tanh(s->adaaUR);
 
     s->eqCrush=(d[8]>1.0)? (int)(SR/d[8]+0.5) : 0; if(s->eqCrush<1)s->eqCrush=0;
 
@@ -1974,9 +2068,28 @@ static inline void master_character(loopex_t *s, double *l, double *r){
 
     double L=*l,R=*r;
 
+    /* Converter stage: sample-rate hold, then word length. Deliberately UNDITHERED -
+     * a 12-bit sampler did not dither, and that raw quantisation floor is most of what
+     * it sounds like. */
     if(s->eqCrush>1){ if(++s->eqCrushCnt>=s->eqCrush){ s->eqCrushHoldL=L; s->eqCrushHoldR=R; s->eqCrushCnt=0; } L=s->eqCrushHoldL; R=s->eqCrushHoldR; }
+    if(s->eqBits>0){ double q=(double)(1<<(s->eqBits-1));
+        if(s->eqCompand){ L=lb_mulaw_quant(L,q); R=lb_mulaw_quant(R,q); }
+        else            { L=floor(L*q+0.5)/q;    R=floor(R*q+0.5)/q; } }
 
-    if(s->eqSat>0.001f){ double dr=1.0+(double)s->eqSat*3.0; L=lb_tanh(L*dr)/lb_tanh(dr); R=lb_tanh(R*dr)/lb_tanh(dr); }
+    if(s->eqBwHz>100.0){ L=bq_L(&s->eqBw[0],L); L=bq_L(&s->eqBw[1],L); L=bq_L(&s->eqBw[2],L);
+                         R=bq_R(&s->eqBw[0],R); R=bq_R(&s->eqBw[1],R); R=bq_R(&s->eqBw[2],R); }
+    /* Saturator. `a` biases the curve so it is no longer odd-symmetric, which is what puts
+     * EVEN harmonics in: transformer and valve warmth. Subtracting the curve's value at
+     * the bias point removes the DC the bias would otherwise leave. Both paths are
+     * normalised by their own value at full scale, so at asym=0 clip=0 this is exactly
+     * the old tanh(L*dr)/tanh(dr). */
+    if(s->eqSat>0.001f){ double dr=1.0+(double)s->eqSat*3.0, a=(double)s->eqAsym*0.25;
+        int hard=s->eqClip;
+        double c0  = hard? lb_clampd(a,-1.0,1.0) : tanh(a);          /* removes the bias DC */
+        double den = (hard? lb_clampd(dr+a,-1.0,1.0) : tanh(dr+a)) - c0;
+        if(fabs(den)<1e-6)den=1e-6;                                  /* normalise at full scale */
+        L=(adaa_run(L*dr+a,&s->adaaUL,&s->adaaFL,hard)-c0)/den;
+        R=(adaa_run(R*dr+a,&s->adaaUR,&s->adaaFR,hard)-c0)/den; }
 
     L=bq_L(&s->eqLoSh,L); L=bq_L(&s->eqMidPk,L); L=bq_L(&s->eqHiSh,L);
 
@@ -2480,8 +2593,10 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"inSource")==0){ int i=match_enum(val,insrc_opts,11); s->inSource=(i>=0)?i:(int)lb_clampf((float)atof(val),0,10); return; }
     SETFR("perfTrem",perfTrem,0.0,1.0) SETFR("perfTremRate",perfTremRate,0.0,1.0) SETFR("punchWidth",punchWidth,0.0,1.0)
     if(strcmp(key,"masterEQ")==0){ int i=match_enum(val,meq_opts,MEQ_N);
+        if(i<0&&strcmp(val,"Juno")==0)    i=MEQ_AIR;       /* renamed; keep old saves resolving */
+        if(i<0&&strcmp(val,"Console")==0) i=MEQ_TRIDENT;   /* ditto */
         if(i<0){   /* sessions written before the reorder stored a raw index in the old order */
-            static const int MEQ_LEGACY[12]={0,6,3,4,5,9,10,11,7,8,2,1};
+            static const int MEQ_LEGACY[12]={0,6,4,3,7,11,9,12,8,2,5,1};
             i=MEQ_LEGACY[(int)lb_clampf((float)atof(val),0,11)]; }
         s->masterEQ=i; master_eq_update(s); return; }
     if(strcmp(key,"loopFiltMode")==0){ int i=match_enum(val,mfmode_opts,MF_NVOICE); s->loopFilterMode=(i>=0)?i:(int)lb_clampf((float)atof(val),0,MF_NVOICE-1); return; }

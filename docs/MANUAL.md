@@ -1,6 +1,6 @@
 # Loopex Manual
 
-*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.0*
+*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.1*
 
 This is the full reference. The [README](../README.md) is the short tour.
 
@@ -134,7 +134,7 @@ Knobs 5–8 only follow a pad while it is physically held; latched pads keep run
 | Track 2 | **Perform** | Stumble Mix | Stumble Step | Stumble Odds | Stumble Size | Stumble Reach | Stumble Kind | Jump | Scan |
 | Track 2 (page 2) | **Perform 2** | Filter Cut | Reso | FChar (filter model) | Clock | ClkMd (Music / Free) | ClkAt (pre / post punch) | Pump | Pump Rate |
 | Track 3 | **Send FX** | A FX | A Amount | A Macro | A Drift | B FX | B Amount | B Macro | B Drift |
-| Track 4 | **Settings** | Arm Threshold | ODub mode | **LpFlt** (loop filter) | Root | In Monitor | **InSrc** (input source) | MIDI In | MIDI Out |
+| Track 4 | **Settings** | Arm Threshold | ODub mode | **LpFlt** (loop filter) | Root | **InCh** (input channels) | **InSrc** (input source) | MIDI In | MIDI Out |
 | Track 4 (page 2) | **Output** | Out | LoCut (20–1000 Hz) | HiCut | PWide (punch width) | Char | gSat (to 2.0) | Glue | Limit |
 | Capture | **Input Tape** | Tape Style | Drive | Wow | Flutter | HF | Lo Cut | Hiss | Generations |
 | Sample | **Drift** | Drift | Rate | Size | FBk | Supr | Blur | Damp | Mix |
@@ -143,7 +143,7 @@ Knobs 5–8 only follow a pad while it is physically held; latched pads keep run
 
 Press the same button again, or **Back**, to close a menu. Enums step once per four detents so a fast turn does not race through the list.
 
-- **Input Tape** — 13 tape models (`Tapeless · Clean · Cass1 · Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk · Porta · Dub · Warp`, default Clean), drive, wow, flutter, HF rolloff, low cut, hiss and **Generations**. It shapes what gets recorded. Each model's high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ. **VHS1** is the Hi-Fi track — a depth-modulated FM carrier with its companding noise reduction, bright but pumping — and **VHS2** the linear edge track, slow and dark. **Generations** re-applies the selected machine's own loss filter once per pass, so a fourth-generation dub of a Reel3 is darker than one of a Reel15.
+- **Input Tape** — 13 tape models (`Tapeless · Clean · Cass1 · Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk · Porta · Dub · Warp`, default Clean), drive, wow, flutter, HF rolloff, low cut, hiss and **Generations**. It shapes what gets recorded. Each model's high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ. **VHS1** is the Hi-Fi track — a depth-modulated FM carrier with its companding noise reduction, bright but pumping — and **VHS2** the linear edge track, slow and dark. **Generations** re-applies the selected machine's own loss filter once per pass, so a fourth-generation dub of a Reel3 is darker than one of a Reel15. **Tapeless** bypasses the *machine* — no hiss floor, no head loss or bump — but every knob on the page still works, and Drive soft-clips on Tapeless and Clean too (it used to be a no-op on the default model). The page shapes what gets **recorded**: set it, then record.
 - **Send FX** — two Palette buses (29 effects: Drive, Sweeten, Fuzz, Howl, Fold, Swell, Doubler, Vibrato, Phaser, Tremolo, Pitch, Shift, Cascade, Reels, Collage, Reverse, Space, Bloom, Filter, Squash, Cassette, Broken, Interference, Halo, Plate, Quartz, Prism, Veil), each with Amount, Macro and Drift. Every effect is loudness-matched to the dry signal it replaces, and switching effects **morphs** — the outgoing effect fades out as the incoming one fades in — so sweeping through the list never clicks. (The swap itself happens on the worker.)
 
   The last four are full reverbs, all 100% wet (they sit on a send):
@@ -180,6 +180,7 @@ Press the same button again, or **Back**, to close a menu. Enums step once per f
 
   Every figure, its source, and whether it is documented, measured or chosen is recorded in [CHARACTER-RESEARCH.md](CHARACTER-RESEARCH.md).
 - **Drift** (Sample button) — a global drifting-delay memory in the spirit of Soma COSMOS. Four coprime-length delay lines, each read at a slowly drifting tap, feed back through a matrix that morphs from self-feedback to a normalised Hadamard cross-mix. The loop mix feeds it, the memory recirculates, and because the line lengths are coprime and each has its own asynchronous LFO, the recombination never lands on an exact repeat. It sits in the master chain just before the pump, so the ambient layer picks up the character EQ, glue and limiter. Feedback is capped below unity, so the tail always fades (up to a few minutes at maximum), and a **silence bleed** clears an abandoned tail after about eight seconds with no input. Knobs: **Drift** (how much loop mix is fed in) · **Rate** (tap-drift speed) · **Size** (tap length, shimmer to long hall) · **FBk** (memory sustain, below unity fades, near unity holds) · **Supr** (loud new input erases old memory: play over to replace) · **Blur** (self-feedback → full cross-mix) · **Damp** (high-frequency damping of the tail) · **Mix** (wet level into the master). Drift and Mix start at zero, so it is silent until dialled in; it saves with the session.
+- **InCh** (input channels, Settings page 1) — `Stereo · Left · Right · Sum`. A mono synth on a single jack arrives on one side only; **Left** (or **Right**) copies that side to both, **Sum** mixes the two. Default Stereo.
 - **InSrc** (input source, Settings page 1) — what each new recording samples:
   `Line · Master · S1 · S2 · S3 · S4 · M1 · M2 · M3 · M4 · Self`. **Line** is the line/mic input (default).
   **Master** is the Move's whole master mix, minus Loopex's own output so the master can never feed back.
@@ -192,7 +193,7 @@ Press the same button again, or **Back**, to close a menu. Enums step once per f
   sends and the master stage — so you can resample the entire mix back into a new loop (bounce,
   layer, regenerate). Unlike **Master** it has *no* feedback guard, because the regeneration is the
   point: the tape limiter at the end of the master chain makes it saturate rather than run away, and
-  **InGain** is how you control how hard it builds.
+  **InGain** is how you control how hard it builds. If the host cannot provide a stem (they need host **1.4** with `link_audio_publish` on), Loopex records Line instead and says so on screen while Settings is open.
 - **MIDI In** — off by default so Move's track MIDI cannot trigger loops. On, an external keyboard plays the selected loop chromatically with 8-voice polyphony, and a LaunchControl XL drives all sixteen loops (section 9).
 - **MIDI Out** — mirrors each loop's transport state to the LaunchControl XL's LEDs (section 9).
 

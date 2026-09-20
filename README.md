@@ -13,7 +13,7 @@ and a MIDI-keyboard polyphony layer.
 > from the norns looper world (*wrms*, *cranes*, *oooooo*, *samsara*, *nydl*, *otis*).
 
 - **Module:** `loopex` · **Name:** Loopex · **Type:** Overtake (Schwung) · **API v2**
-- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.0 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
+- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.1 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
 
 ---
 
@@ -119,6 +119,9 @@ speeds genuinely differ. **VHS1** is the Hi-Fi track — a depth-modulated FM ca
 companding noise reduction, bright but pumping — and **VHS2** the linear edge track, slow and
 dark. **Generations** re-applies the selected machine's own loss filter once per pass, so a
 fourth-generation dub of a Reel3 is darker than one of a Reel15.
+**Tapeless** bypasses the *machine* — no hiss floor, no head loss or bump — but every knob on the page
+still works, and Drive soft-clips on Tapeless and Clean too (it used to be a no-op on the default
+model). The page shapes what gets **recorded**: set it, then record.
 
 ### Drift — a global evolving memory (Sample button)
 A drifting-delay memory station inspired by **Soma COSMOS**, on the **Sample** button. Four
@@ -154,7 +157,8 @@ shifters the same way. Sessions live in
   see [Known limitations](#known-limitations)); **Ctrl** hands external MIDI to the LaunchControl
   XL control surface (below). Off by default so Move tracks' MIDI-out can't trigger loops.
 - **Settings (two pages):** page 1 is behaviour and I/O — arm threshold, overdub mode, **loop filter**
-  (the 12 Master-filter voicings applied to every loop's low-pass), root note, input monitoring,
+  (the 12 Master-filter voicings applied to every loop's low-pass), root note, **input channels**
+  (`InCh`: Stereo · Left · Right · Sum — a mono synth on one jack records to both sides with `Left`),
   **input source** (see below), MIDI In and MIDI Out. Page 2 is **Output**, the master stage in
   signal order: Out · LoCut · HiCut · PWide · **Char** · gSat · Glue · Limit.
 - **Character** (Output page) is thirteen hardware voicings ordered by grit — `Off · 962 · Air · SSL
@@ -195,6 +199,8 @@ shifters the same way. Sessions live in
   sends and the master stage — so you can resample the whole mix back into a new loop. Unlike
   **Master** it carries *no* feedback guard, because the regeneration is the point: the tape limiter
   at the end of the master chain keeps it saturating instead of diverging, and InGain is the control.
+  If the host cannot provide a stem (they need host **1.4** with `link_audio_publish` on), Loopex records
+  Line instead and says so on screen while Settings is open.
 - **Undo** reverts the last overdub exactly (each overwritten sample is saved as it goes), else restores the last cleared loop.
 
 ### LaunchControl XL (external MIDI)

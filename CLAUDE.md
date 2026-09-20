@@ -95,6 +95,11 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
 - **InSrc (Link Audio)** — `Line · Master · S1-4 · M1-4`. `S1-4` read Schwung's published stems
   from `/schwung-pub-audio` ("BPAL"); `M1-4` read the reconstructed Move tracks from
   `/schwung-link-in` ("LAIN"). Both read-only, with a **private cursor** (never touch `read_pos`).
+  A stem that is not there (host < 1.4 or `link_audio_publish` off) falls back to Line; `inSrcLive`
+  (get_param) is 0 then and the UI says so while Settings p1 is open. `inChan` (Stereo/Left/Right/Sum)
+  is applied right after the source read.
+- **Input Tape knobs act on every model** (0.9.1). They were gated on `preModel>0`, which made the
+  page dead on Tapeless and Drive a x4-then-/4 no-op on Clean. Tapeless/Clean soft-clip under Drive.
 
 ---
 
@@ -105,7 +110,7 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   HeadMix = per-head Vol/Pan; **H1V/H1P are the same params as page 1's Vol/Pan** by design.
 - **8 menus** — track buttons 1-4 → Input FX / Perform / Send FX / Settings; Capture → Input
   Tape; ≡ → Sessions; ● → Drift; ✕ → FX Seq. **Perform and Settings are two-page.**
-- **Settings p1** ArmTh · ODub · LpFlt · Root · InMon · InSrc · MIDI · MidiO —
+- **Settings p1** ArmTh · ODub · LpFlt · Root · **InCh** (0.9.1; was a duplicate InMon) · InSrc · MIDI · MidiO —
   **p2 is named "Output"** (`MENU_PAGE_NAMES`): Out · LoCut · HiCut · PWide · Char · gSat · Glue · Limit,
   in signal order after the punch bank. **Perform p2:** Cut · Reso · FChar · Clock · ClkMd · ClkAt ·
   Pump · PmpRt. Dropout (`dropAmt`) exists in the DSP but is **not on any page**.
@@ -134,7 +139,7 @@ JS drives the DSP entirely through `set_param(key,val)` / `get_param(key)`.
 - **Globals:** master/output (`masterVol masterLoCut masterHiCut masterEQ masterGlue tapeLimit
   globalSat masterComp`), behaviour (`overdubMode armThresh rootNote stability globalWowFlut
   loopFiltMode selTrack`), I/O (`inSource inputMonitor inputGain inLow inMid inMidFreq inHigh
-  inHighFreq`), tape (`tape*`), perform (`st* mf* mClock* perfTrem* dropAmt`), drift (`drift*`),
+  inHighFreq inChan`), tape (`tape*`), perform (`st* mf* mClock* perfTrem* dropAmt`), drift (`drift*`),
   punch (`punchWidth pfx pflfo punch punchPress`), sequencer (`fxseq*`), MIDI (`midiIn midiOut`).
 - **Commands:** `cmd` (`tap/odub/clear/unclr/undo/mute/sel/arm/clone`), `session`, `scrub`,
   `headpos`, `jump`, `scan`, `tapeHold`, `clearSel`, `clearAll`.

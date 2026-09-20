@@ -173,7 +173,7 @@ const MENU_DEFS = [
     [ /* Track 4 — Settings: p1 behaviour + I/O, p2 output & character */
       { k:'armThresh', lo:0, hi:1, lbl:'ArmTh' },     { k:'overdubMode', opts:['Replace','Multiply','Disint'], lbl:'ODub' },
       { k:'loopFiltMode', opts:['Clean','SEM','MS-20','Steiner','Ladder4','Ladder2','Ladder1','Prophet','Oberheim','Diode','K35','Vintage'], lbl:'LpFlt' },
-      { k:'rootNote', lo:24, hi:96, lbl:'Root', int:true }, { k:'inputMonitor', lo:0, hi:1, lbl:'InMon' },
+      { k:'rootNote', lo:24, hi:96, lbl:'Root', int:true }, { k:'inChan', opts:['Stereo','Left','Right','Sum'], lbl:'InCh' },   /* was a second InMon (same param as Input FX > Mon) */
       { k:'inSource', opts:['Line','Master','S1','S2','S3','S4','M1','M2','M3','M4','Self'], lbl:'InSrc' },
       { k:'midiIn', opts:['Off','Keys','Ctrl'], lbl:'MIDI' },  { k:'midiOut', opts:['Off','On'], lbl:'MidiO' },
       { k:'masterVol', lo:0, hi:1.5, lbl:'Out' },     { k:'masterLoCut', lo:20, hi:1000, lbl:'LoCut', int:true, step:5 },
@@ -1047,7 +1047,7 @@ const FULL_NAMES = {
     v_ph3mode: 'Head 3 Mode', v_ph3spd: 'Head 3 Speed', v_ph4mode: 'Head 4 Mode', v_ph4spd: 'Head 4 Speed',
     v_hvol2: 'Head 2 Vol', v_hpan2: 'Head 2 Pan', v_hvol3: 'Head 3 Vol', v_hpan3: 'Head 3 Pan',
     v_hvol4: 'Head 4 Vol', v_hpan4: 'Head 4 Pan',
-    inputMonitor: 'Monitor', preamp: 'Tape Style', inputGain: 'Input Gain', inLow: 'Input Low', inMid: 'Input Mid',
+    inChan: 'Input Channels', inputMonitor: 'Monitor', preamp: 'Tape Style', inputGain: 'Input Gain', inLow: 'Input Low', inMid: 'Input Mid',
     inMidFreq: 'Input Mid Freq', inHigh: 'Input High', inHighFreq: 'Input High Freq',
     sendAType: 'Send A FX', sendAM1: 'Send A Amount', sendAM2: 'Send A Macro', sendADrift: 'Send A Drift',
     sendBType: 'Send B FX', sendBM1: 'Send B Amount', sendBM2: 'Send B Macro', sendBDrift: 'Send B Drift',
@@ -1317,6 +1317,12 @@ globalThis.tick = function () {
         const h = gp('heads'); if (h) headsStr = h;
         if (tickCount % 12 === 5) { const a = parseFloat(gp('v_start')); if (!isNaN(a)) waveStart = a;
                                     const b = parseFloat(gp('v_end'));   if (!isNaN(b)) waveEnd = b; }
+    }
+    /* InSrc S1-4 / M1-4 need host 1.4 with link_audio_publish; below that the DSP falls back to
+     * Line. It used to do so silently (user report). While Settings p1 is open, say so. */
+    if (menu === 3 && menuPage === 0 && tickCount % 12 === 3) {
+        const src = gp('inSource'), live = gp('inSrcLive');
+        if (src && live === '0' && /^[SM][1-4]$/.test(src)) setMsg(src + ' unavailable - using Line');
     }
     if (tickCount % 15 === 9) { const m = parseFloat(gp('driftMix')); const on = !isNaN(m) && m > 0.1;
         if (on !== driftMixOn) { driftMixOn = on; paintNav(); } }

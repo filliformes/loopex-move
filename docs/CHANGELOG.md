@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.9.1 — 2026-09-20
+
+Fixes from the first day of user feedback on 0.8.7 / 0.9.0.
+
+- **Input Tape knobs work on every tape model.** They were gated on the model, which made the whole
+  page silently dead on `Tapeless`, and on `Clean` — the default — Drive multiplied by 4 and then
+  divided by 4 around a model that does not saturate: a no-op. Tapeless and Clean now soft-clip
+  under Drive; the coloured models keep their own curves. Tapeless still has no hiss floor and no
+  head loss or bump: it bypasses the machine, not the knobs. (Thanks Neuro.)
+- **Input channels** (`InCh`, Settings page 1: Stereo · Left · Right · Sum). A mono synth on one jack
+  used to record on one side only; `Left` copies it to both. Replaces the second `InMon`, which was
+  the same parameter as the Input FX menu's `Mon`. (Thanks CTribe.)
+- **InSrc says when a stem is unavailable.** `S1–S4` / `M1–M4` need host 1.4 with
+  `link_audio_publish`; below that they fell back to Line without a word, so the selector looked
+  broken. It still falls back, and now says so on screen while Settings is open. (Thanks Hannes.)
+- **Sends are stereo.** They were a mono sum, so every delay-type Palette effect (Collage, Cascade,
+  Reels, Reverse) came back mono on a stereo loop; the reverbs only hid it because they generate
+  their own width. Sends are now stereo and post-pan, so the bus gets what you hear from the loop.
+- **Tape Drive pushes.** Up to +24 dB into the curve with makeup, instead of +12 dB and exact unity,
+  which never reached the knee from a line-level source.
+
 ## v0.9.0 — 2026-09-20
 
 The biggest release since the Overtake conversion: the Character system rebuilt from manufacturer

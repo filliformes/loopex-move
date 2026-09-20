@@ -549,6 +549,9 @@ typedef struct {
     float preamp,overdubMode,stability;int selTrack;
     float globalWowFlut,inputMonitor,inputGain;
     int inSource;                          /* 0 Line, 1 Master, 2-5 = Schwung S1-4 (pub), 6-9 = Move M1-4 (link-in), 10 = own master out */
+    int inChan;                            /* 0 Stereo, 1 Left->both, 2 Right->both, 3 Sum: a mono synth on one jack records to both sides */
+    float tdCache; double tdG, tdMk;       /* tape Drive gain + makeup, recomputed when the knob moves */
+    int inSrcLive;                         /* 1 when the selected source delivered audio this block; 0 = stem unavailable, fell back to Line */
     la_in_shm_t *laShm; int laFd; uint32_t laRead; int laSlotCur;   /* Link Audio track source (OG Move tracks) */
     bpa_shm_t *bpaShm; int bpaFd; uint32_t bpaRead; int bpaSlotCur; /* Schwung published stems source */
     float selfPrevL[128], selfPrevR[128];  /* last block's own output, subtracted when recording the master (feedback guard) */
@@ -1751,9 +1754,13 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         v->panL_c=cos((pn+1.0)*0.25*M_PI); v->panR_c=sin((pn+1.0)*0.25*M_PI); v->panTrigCache=(float)pn; }
     double panL=v->panL_c,panR=v->panR_c;
     *outL=sL*vol*panL;*outR=sR*vol*panR;
-    double sSig=(sL+sR)*0.5*vol;
-    *sendAL=sSig*(double)v->send;  *sendAR=*sendAL;    /* Send A -> delay bus */
-    *sendBL=sSig*(double)v->sendB; *sendBR=*sendBL;    /* Send B -> reverb bus */
+    /* Sends are STEREO, post-pan: the bus gets what you hear from the loop. They were a
+     * mono sum, which made every delay-type Palette effect (Collage, Cascade, Reels,
+     * Reverse) come back mono on a stereo loop - the reverbs only hid it because they
+     * generate their own width (user report, 0.9.0). */
+    double sGL=sL*vol*panL, sGR=sR*vol*panR;
+    *sendAL=sGL*(double)v->send;  *sendAR=sGR*(double)v->send;    /* Send A -> delay bus */
+    *sendBL=sGL*(double)v->sendB; *sendBR=sGR*(double)v->sendB;   /* Send B -> reverb bus */
 }
 
 /* ---- Disintegration pass ---- */
@@ -1836,7 +1843,8 @@ static inline void poly_sample(loopex_t *s, double *mixL, double *mixR, double *
         double vol=(double)lp->volume,pn=(double)lp->pan;
         double panL=cos((pn+1.0)*0.25*M_PI),panR=sin((pn+1.0)*0.25*M_PI);
         *mixL+=l*vol*panL; *mixR+=r*vol*panR;
-        double ssig=(l+r)*0.5*vol; *sAL+=ssig*(double)lp->send; *sAR+=ssig*(double)lp->send; *sBL+=ssig*(double)lp->sendB; *sBR+=ssig*(double)lp->sendB;
+        { double gl=l*vol*panL, gr=r*vol*panR;   /* stereo, post-pan, same as voice_render */
+          *sAL+=gl*(double)lp->send; *sAR+=gr*(double)lp->send; *sBL+=gl*(double)lp->sendB; *sBR+=gr*(double)lp->sendB; }
     }
 }
 
@@ -1910,7 +1918,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     s->driftSm[4]=0.0f; s->driftSm[5]=0.40f; s->driftSm[6]=0.40f; s->driftSm[7]=0.0f;
     s->mfCut=1.0f; s->mfReso=0.0f; s->mfCutSm=1.0f; s->mfResoSm=0.0f; s->mfMode=0; s->mClock=0.5f; s->mClockMode=0; s->mClockSpot=0; s->mclkRatioSm=1.0f; s->mclkWet=0.0f;
     s->perfTrem=0.0f; s->perfTremRate=0.08f; s->punchWidth=0.5f;   /* rate default -> di 0 = one pump per beat */
-    s->masterEQ=1; s->masterGlue=0.0f;   /* 1 = MEQ_962 (enum declared later); asserted below */ s->tapeLimit=0.0f; master_eq_update(s); s->inSource=0; s->loopFilterMode=0;
+    s->masterEQ=1; s->masterGlue=0.0f;   /* 1 = MEQ_962 (enum declared later); asserted below */ s->tapeLimit=0.0f; master_eq_update(s); s->inSource=0; s->inChan=0; s->inSrcLive=1; s->tdCache=-1.0f; s->tdG=1.0; s->tdMk=1.0; s->loopFilterMode=0;
     s->laShm=NULL; s->laFd=-1; s->laRead=0; s->laSlotCur=-1;
     { int fd=shm_open(LA_IN_SHM_NAME,O_RDONLY,0);   /* map Move's per-track audio if the host is streaming it */
       if(fd>=0){ void *p=mmap(NULL,sizeof(la_in_shm_t),PROT_READ,MAP_SHARED,fd,0);
@@ -2677,6 +2685,9 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         if(avail > (BPA_RING_SAMPLES-BPA_RING_SAMPLES/4)){ s->bpaRead=wp-need; avail=need; }   /* fell behind -> resync */
         if(avail>=need){ bpaBase=s->bpaRead; s->bpaRead+=need; bpaOn=1; }
     }
+    /* Tell the UI when a stem source is not there (host < 1.4, or link_audio_publish off):
+     * the fallback to Line below is right, but it used to be silent (user report). */
+    s->inSrcLive=(useSelf||useMaster)?1:(laSlot>=0?laOn:(bpaSlot>=0?bpaOn:(micBuf?1:0)));
     int selIdx=s->selTrack-1;
     for(int vi=0;vi<NUM_VOICES;vi++){ Voice *fv=&s->voice[vi];
         fv->filterSm+=(fv->filter-fv->filterSm)*0.25f;      /* ~10ms at 2.9ms/block */
@@ -2751,16 +2762,31 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
             double aL=fabs(inL),aR=fabs(inR);if(aL>s->inputPeakL)s->inputPeakL=aL;if(aR>s->inputPeakR)s->inputPeakR=aR; }
         else if(micBuf){double ig=(double)s->inputGain;inL=(double)micBuf[n*2]/32768.0*ig;inR=(double)micBuf[n*2+1]/32768.0*ig;
             double aL=fabs(inL),aR=fabs(inR);if(aL>s->inputPeakL)s->inputPeakL=aL;if(aR>s->inputPeakR)s->inputPeakR=aR;}
+        /* Input channels: a mono synth on one jack arrives on one side only. */
+        if(s->inChan==1) inR=inL; else if(s->inChan==2) inL=inR; else if(s->inChan==3){ double m=0.5*(inL+inR); inL=m; inR=m; }
         int preModel=(int)lb_clampf(s->preamp,0.0f,12.0f);
-        double tdG=1.0+(double)s->tapeDrive*3.0;                  /* tape drive w/ unity makeup */
-        if(preModel>0&&s->tapeDrive>0.001f){ inL*=tdG; inR*=tdG; }
+        /* The Input Tape knobs act on EVERY model. They were gated on preModel>0, so on
+         * Tapeless the whole page was silently dead - and on Clean, Drive was x4 then /4
+         * around a model that does not saturate: a no-op on the DEFAULT model (user
+         * report, v0.8.7). Tapeless/Clean now clip softly under Drive; the coloured models
+         * keep their own curves inside apply_preamp_sample. Tapeless still has no hiss
+         * floor and no head loss or bump: it bypasses the MACHINE, not the knobs. */
+        /* Drive: up to x16 (+24 dB) into the curve, square-law so the first third is gentle,
+         * with g^-0.8 makeup. The old x4-with-exact-unity-makeup never reached the knee from a
+         * line-level source (-20 dBFS x4 = 0.4 -> half a dB, 1% THD): "Drive does nothing",
+         * twice reported. Now quiet material rises and loud material compresses - which is
+         * what driving tape does - and the level stays roughly put. */
+        if(s->tapeDrive!=s->tdCache){ double d=(double)s->tapeDrive; s->tdG=1.0+d*d*15.0; s->tdMk=pow(s->tdG,-0.8); s->tdCache=s->tapeDrive; }
+        double tdG=s->tdG, tdMk=s->tdMk;
+        int drv=(s->tapeDrive>0.001f);
+        if(drv){ inL*=tdG; inR*=tdG; if(preModel<=1){ inL=lb_tanh(inL); inR=lb_tanh(inR); } }
         apply_preamp_sample(&inL,&inR,preModel,&s->casLpL,&s->casLpR,&s->vhsCmpL,&s->vhsCmpR,&s->rng,(double)s->tapeNoise);
-        if(preModel>0&&s->tapeDrive>0.001f){ inL/=tdG; inR/=tdG; }
-        if(preModel>0&&TAPE_BUMP_DB[preModel]>0.05){ inL=bq_L(&s->inBump,inL); inR=bq_R(&s->inBump,inR); }
-        if(preModel>0&&s->tapeHF<0.99f){ inL=bq_L(&s->inTapeLp,inL); inR=bq_R(&s->inTapeLp,inR); }
-        if(preModel>0&&s->tapeLoCut>0.01f){ inL=bq_L(&s->inTapeHp,inL); inR=bq_R(&s->inTapeHp,inR); }
-        if(preModel>0) input_wowflutter(s,&inL,&inR,(double)s->tapeWow,(double)s->tapeFlut);
-        if(preModel>0) input_generations(s,&inL,&inR,(double)s->tapeGen,TAPE_LOSS_K[preModel],&s->rng);
+        if(drv){ inL*=tdMk; inR*=tdMk; }
+        if(TAPE_BUMP_DB[preModel]>0.05){ inL=bq_L(&s->inBump,inL); inR=bq_R(&s->inBump,inR); }
+        if(s->tapeHF<0.99f){ inL=bq_L(&s->inTapeLp,inL); inR=bq_R(&s->inTapeLp,inR); }
+        if(s->tapeLoCut>0.01f){ inL=bq_L(&s->inTapeHp,inL); inR=bq_R(&s->inTapeHp,inR); }
+        input_wowflutter(s,&inL,&inR,(double)s->tapeWow,(double)s->tapeFlut);
+        input_generations(s,&inL,&inR,(double)s->tapeGen,TAPE_LOSS_K[preModel],&s->rng);
         if(fabs(s->inLow)>0.007f){inL=bq_L(&s->inEqLo,inL);inR=bq_R(&s->inEqLo,inR);}
         if(fabs(s->inMid)>0.007f){inL=bq_L(&s->inEqMid,inL);inR=bq_R(&s->inEqMid,inR);}
         if(fabs(s->inHigh)>0.007f){inL=bq_L(&s->inEqHi,inL);inR=bq_R(&s->inEqHi,inR);}
@@ -2958,6 +2984,7 @@ static const char *preamp_opts[]={"Tapeless","Clean","Cass1","Cass2","VHS1","VHS
 #define NUM_PREAMP 13
 static const char *odmode_opts[]={"Replace","Multiply","Disint"};
 static const char *insrc_opts[]={"Line","Master","S1","S2","S3","S4","M1","M2","M3","M4","Self"};
+static const char *inchan_opts[]={"Stereo","Left","Right","Sum"};
 static const char *midiin_opts[]={"Off","Keys","Ctrl"};   /* external MIDI: ignore / keyboard poly / LCXL control */
 static const char *reverse_opts[]={"Normal","Reverse"};
 static const char *stkind_opts[]={"Tumble","Stutter","Reverse","Tape","Gate","Crush"};
@@ -3067,6 +3094,7 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"mClockMode")==0){ static const char*o[]={"Music","Free"}; int i=match_enum(val,o,2); s->mClockMode=(i>=0)?i:(atof(val)>0.5?1:0); return; }
     if(strcmp(key,"mClockSpot")==0){ static const char*o[]={"Pre","Post"}; int i=match_enum(val,o,2); s->mClockSpot=(i>=0)?i:(atof(val)>0.5?1:0); return; }
     if(strcmp(key,"inSource")==0){ int i=match_enum(val,insrc_opts,11); s->inSource=(i>=0)?i:(int)lb_clampf((float)atof(val),0,10); return; }
+    if(strcmp(key,"inChan")==0){ int i=match_enum(val,inchan_opts,4); s->inChan=(i>=0)?i:(int)lb_clampf((float)atof(val),0,3); return; }
     SETFR("perfTrem",perfTrem,0.0,1.0) SETFR("perfTremRate",perfTremRate,0.0,1.0) SETFR("punchWidth",punchWidth,0.0,1.0)
     if(strcmp(key,"masterEQ")==0){ int i=match_enum(val,meq_opts,MEQ_N);
         if(i<0&&strcmp(val,"Juno")==0)    i=MEQ_AIR;       /* renamed; keep old saves resolving */
@@ -3413,7 +3441,8 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
     if(strcmp(key,"masterLoCut")==0)return snprintf(buf,buf_len,"%d",(int)s->masterLoCut);
     if(strcmp(key,"masterHiCut")==0)return snprintf(buf,buf_len,"%d",(int)s->masterHiCut);
     GETP("masterVol",masterVol)
-    GETE("preamp",preamp,preamp_opts,NUM_PREAMP); GETE("overdubMode",overdubMode,odmode_opts,3); GETE("inSource",inSource,insrc_opts,11); GETE("loopFiltMode",loopFilterMode,mfmode_opts,MF_NVOICE);
+    GETE("preamp",preamp,preamp_opts,NUM_PREAMP); GETE("overdubMode",overdubMode,odmode_opts,3); GETE("inSource",inSource,insrc_opts,11); GETE("inChan",inChan,inchan_opts,4);
+    if(strcmp(key,"inSrcLive")==0) return snprintf(buf,buf_len,"%d",s->inSrcLive); GETE("loopFiltMode",loopFilterMode,mfmode_opts,MF_NVOICE);
     GETP("stability",stability) GETP("globalWowFlut",globalWowFlut) GETP("inputMonitor",inputMonitor) GETP("inputGain",inputGain)
     GETP("inLow",inLow) GETP("inMid",inMid) GETP("inMidFreq",inMidFreq) GETP("inHigh",inHigh) GETP("inHighFreq",inHighFreq)
     GETP("tapeNoise",tapeNoise) GETP("tapeDrive",tapeDrive) GETP("tapeHF",tapeHF)
@@ -3496,7 +3525,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
         WF("tapeNoise",s->tapeNoise);WF("tapeDrive",s->tapeDrive);WF("tapeHF",s->tapeHF);
         WI("midiIn",s->midiIn);WI("midiOut",s->midiOut);WF("armThresh",s->armThresh);WF("tapeLoCut",s->tapeLoCut);WF("tapeWow",s->tapeWow);WF("tapeFlut",s->tapeFlut);WF("tapeGen",s->tapeGen);
         /* Master + keyboard */
-        WF("masterVol",s->masterVol);WI("rootNote",s->rootNote);WI("inSource",s->inSource);WI("loopFiltMode",s->loopFilterMode);
+        WF("masterVol",s->masterVol);WI("rootNote",s->rootNote);WI("inSource",s->inSource);WI("inChan",s->inChan);WI("loopFiltMode",s->loopFilterMode);
         WF("driftAmt",s->driftAmt);WF("driftRate",s->driftRate);WF("driftSize",s->driftSize);WF("driftFb",s->driftFb);
         WF("driftSupr",s->driftSupr);WF("driftBlur",s->driftBlur);WF("driftDamp",s->driftDamp);WF("driftMix",s->driftMix);
         /* FX sequencer */

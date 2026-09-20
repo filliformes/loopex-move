@@ -243,21 +243,38 @@ static inline double tape_sat(double x) {
 /* ---- Preamp models (13 types; 0 = Tapeless bypass) ----
  * `tapeNoise` scales the whole noise floor (Tape menu); base floor lowered for a
  * cleaner front end, and Clean's contribution cut hard. */
+/* Per-model HF loss, derived rather than dialled. Chowdhury's playhead loss filter
+ * (DAFx-19 eq. 13) is the product of three terms, all scaled by TAPE SPEED:
+ *     spacing  e^(-kd)   thickness (1-e^(-k*delta))/(k*delta)   gap  sinc(k*g/2),  k = 2*pi*f/v
+ * The one-pole coefficients below are each the -3 dB point of that product at that
+ * model's real transport speed - 15 / 7.5 / 3.75 ips for the reels, 1.875 for cassette,
+ * 3.75 for the Portastudio's double speed, ~0.92 for VHS linear audio - with head geometry
+ * distinguishing a good deck from a cheap one within a format.
+ * This FIXED AN INVERTED ORDERING: Reel7 sat at 2019 Hz against Reel3 at 4865, so the
+ * middle tape speed was darker than the slowest, and Reel7 was the darkest model in the
+ * list - darker than a cassette. Reel15 had no rolloff at all. Now Reel15 > Reel7 > Reel3
+ * > Porta > Cass1 > 4trk > Cass2 > Dub > VHS1 > VHS2, which is what transport speed says.
+ * CALIBRATION NOTE: raw eq. 13 is far darker than any real machine because it omits the
+ * record/playback pre-emphasis that compensates it - Chowdhury says the same, and pairs
+ * his model with a separate circuit model. The effective recorded layer is set to the
+ * short-wavelength value (self-demagnetisation), which is physically defensible and lands
+ * the range musically. The SPEED SCALING is the physics; the absolute reference is ours. */
 static inline void apply_preamp_sample(double *l, double *r, int model, double *casLpL, double *casLpR, uint32_t *rng, double nAmt) {
     if(model<=0) return;                       /* Tapeless: true bypass, no colour, no noise */
     double noise=lb_rand(rng)*0.005*nAmt;
     switch(model){
     case 1:*l+=noise*0.05;*r+=noise*0.05;break;   /* Clean */
-    case 2:{*l=lb_tanh(*l*1.8)+noise;*r=lb_tanh(*r*1.8)+noise;double k=0.45;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 3:{*l=atan(*l*1.6)*0.6366+noise;*r=atan(*r*1.6)*0.6366+noise;double k=0.38;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 4:{*l=lb_tanh(*l*1.3)+noise*1.5;*r=lb_tanh(*r*1.3)+noise*1.5;double k=0.55;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 5:{*l=tape_sat(*l*1.1)+noise*0.5;*r=tape_sat(*r*1.1)+noise*0.5;double k=0.3;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 6:*l=tape_sat(*l)+noise*0.15;*r=tape_sat(*r)+noise*0.15;break;
-    case 7:{*l=tape_sat(*l*1.15)+noise*0.3;*r=tape_sat(*r*1.15)+noise*0.3;double k=0.25;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 8:{*l=sin(lb_clampd(*l*1.5,-1.5,1.5))+noise*0.5;*r=sin(lb_clampd(*r*1.5,-1.5,1.5))+noise*0.5;double k=0.5;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 9:{*l=lb_tanh(*l*1.6)+noise*0.6;*r=lb_tanh(*r*1.6)+noise*0.6;double k=0.42;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 10:{*l=sin(lb_clampd(*l*1.8,-1.5,1.5))+noise*0.8;*r=sin(lb_clampd(*r*1.8,-1.5,1.5))+noise*0.8;double k=0.48;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
-    case 11:{*l=lb_tanh(*l*2.2)*0.85+noise*0.4;*r=lb_tanh(*r*2.2)*0.85+noise*0.4;double k=0.52;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 2:{*l=lb_tanh(*l*1.8)+noise;*r=lb_tanh(*r*1.8)+noise;double k=0.296;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 3:{*l=atan(*l*1.6)*0.6366+noise;*r=atan(*r*1.6)*0.6366+noise;double k=0.225;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 4:{*l=lb_tanh(*l*1.3)+noise*1.5;*r=lb_tanh(*r*1.3)+noise*1.5;double k=0.120;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 5:{*l=tape_sat(*l*1.1)+noise*0.5;*r=tape_sat(*r*1.1)+noise*0.5;double k=0.088;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 6:{*l=tape_sat(*l)+noise*0.15;*r=tape_sat(*r)+noise*0.15;double k=0.923;
+        *casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 7:{*l=tape_sat(*l*1.15)+noise*0.3;*r=tape_sat(*r*1.15)+noise*0.3;double k=0.823;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 8:{*l=sin(lb_clampd(*l*1.5,-1.5,1.5))+noise*0.5;*r=sin(lb_clampd(*r*1.5,-1.5,1.5))+noise*0.5;double k=0.580;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 9:{*l=lb_tanh(*l*1.6)+noise*0.6;*r=lb_tanh(*r*1.6)+noise*0.6;double k=0.247;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 10:{*l=sin(lb_clampd(*l*1.8,-1.5,1.5))+noise*0.8;*r=sin(lb_clampd(*r*1.8,-1.5,1.5))+noise*0.8;double k=0.459;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
+    case 11:{*l=lb_tanh(*l*2.2)*0.85+noise*0.4;*r=lb_tanh(*r*2.2)*0.85+noise*0.4;double k=0.211;*casLpL+=k*(*l-*casLpL);*l=*casLpL;*casLpR+=k*(*r-*casLpR);*r=*casLpR;break;}
     case 12:{double al=fabs(*l),ar=fabs(*r);double spL=(al>0.001)?sin(*l*al)/al:*l;double spR=(ar>0.001)?sin(*r*ar)/ar:*r;
         *l=lb_tanh(spL*0.8+sin(*l)*0.5)+noise;*r=lb_tanh(spR*0.8+sin(*r)*0.5)+noise;break;}
     default:break;}
@@ -807,9 +824,14 @@ static inline void voice_wowflutter_stereo(Voice *v, double *l, double *r, doubl
     double offset=depth+depth*sin(v->flutSweep);v->flutSweep+=v->flutNextMax*freq;
     if(v->flutSweep>TWOPI){v->flutSweep-=TWOPI;v->flutNextMax=0.24+(lb_rand(&v->rng)*0.5+0.5)*0.74;}
     int count=wr+(int)floor(offset);double frac=offset-floor(offset);
+    /* Hermite, not linear. Linear interpolation is a fractional-delay-dependent low-pass -
+     * the exact artefact lb_loop_read was upgraded away from - and this path is fractional
+     * BY DEFINITION: the read offset is a continuously swept sine, so the delay never sits
+     * on an integer. It was the one modulated reader still on linear. */
     int i0=count&(FLUTTER_BUF-1),i1=(count+1)&(FLUTTER_BUF-1);
-    double oL=v->flutBufL[i0]*(1.0-frac)+v->flutBufL[i1]*frac;
-    double oR=v->flutBufR[i0]*(1.0-frac)+v->flutBufR[i1]*frac;
+    int im1=(count-1)&(FLUTTER_BUF-1),i2=(count+2)&(FLUTTER_BUF-1);
+    double oL=lb_hermite(v->flutBufL[im1],v->flutBufL[i0],v->flutBufL[i1],v->flutBufL[i2],frac);
+    double oR=lb_hermite(v->flutBufR[im1],v->flutBufR[i0],v->flutBufR[i1],v->flutBufR[i2],frac);
     v->flutWr=(wr-1+FLUTTER_BUF)&(FLUTTER_BUF-1);
     *l=*l*(1.0-amt*0.7)+oL*(amt*0.7);*r=*r*(1.0-amt*0.7)+oR*(amt*0.7);
 }
@@ -821,9 +843,14 @@ static inline void master_wowflutter_stereo(loopex_t *s, double *l, double *r, d
     double offset=depth+depth*sin(s->gFlutSweep);s->gFlutSweep+=s->gFlutNextMax*freq;
     if(s->gFlutSweep>TWOPI){s->gFlutSweep-=TWOPI;s->gFlutNextMax=0.24+(lb_rand(&s->rng)*0.5+0.5)*0.74;}
     int count=wr+(int)floor(offset);double frac=offset-floor(offset);
+    /* Hermite, not linear. Linear interpolation is a fractional-delay-dependent low-pass -
+     * the exact artefact lb_loop_read was upgraded away from - and this path is fractional
+     * BY DEFINITION: the read offset is a continuously swept sine, so the delay never sits
+     * on an integer. It was the one modulated reader still on linear. */
     int i0=count&(FLUTTER_BUF-1),i1=(count+1)&(FLUTTER_BUF-1);
-    double oL=s->gFlutBufL[i0]*(1.0-frac)+s->gFlutBufL[i1]*frac;
-    double oR=s->gFlutBufR[i0]*(1.0-frac)+s->gFlutBufR[i1]*frac;
+    int im1=(count-1)&(FLUTTER_BUF-1),i2=(count+2)&(FLUTTER_BUF-1);
+    double oL=lb_hermite(s->gFlutBufL[im1],s->gFlutBufL[i0],s->gFlutBufL[i1],s->gFlutBufL[i2],frac);
+    double oR=lb_hermite(s->gFlutBufR[im1],s->gFlutBufR[i0],s->gFlutBufR[i1],s->gFlutBufR[i2],frac);
     s->gFlutWr=(wr-1+FLUTTER_BUF)&(FLUTTER_BUF-1);
     *l=*l*(1.0-amt*0.7)+oL*(amt*0.7);*r=*r*(1.0-amt*0.7)+oR*(amt*0.7);
 }

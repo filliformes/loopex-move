@@ -451,7 +451,7 @@ typedef struct {
     float selfPrevL[128], selfPrevR[128];  /* last block's own output, subtracted when recording the master (feedback guard) */
     double inputPeakL,inputPeakR;
     Voice voice[NUM_VOICES];
-    Biquad masterLo,masterHi;
+    Biquad masterLo[3],masterHi[3];
     /* Global FX: two selectable send buses (0=Delay 1=Reverb 2=Chorus) + Macro1/Macro2/Drift */
     int sendAType,sendBType; float sendAM1,sendAM2,sendADrift,sendBM1,sendBM2,sendBDrift;
     /* Perform: Stumble (master stochastic glitch, Forgetful-style) + Dropout */
@@ -482,7 +482,8 @@ typedef struct {
     float drDcXL[4], drDcYL[4], drDcXR[4], drDcYR[4];   /* DC blockers in each Drift feedback line */
     float selfDcXL, selfDcYL, selfDcXR, selfDcYR;       /* ...and across the Self (own-output) loop */
     int drSilent; float drBleed;   /* abandoned-tail silence bleed */
-    Biquad eqLoSh, eqMidPk, eqHiSh, eqBw[3]; double eqBwHz; int eqCrush, eqBits, eqClip, eqCompand; float eqSat, eqAsym, eqMakeup;
+    Biquad eqLoSh, eqMidPk, eqHiSh, eqBw[3]; double eqBwHz;
+    int eqPoles; double loOneL, loOneR, hiOneL, hiOneR, loOneK, hiOneK;   /* Output filter cascade */ int eqCrush, eqBits, eqClip, eqCompand; float eqSat, eqAsym, eqMakeup;
     double adaaUL, adaaUR, adaaFL, adaaFR;   /* ADAA history for the Character saturator */
     uint32_t outDitRng;                      /* TPDF dither for the final 16-bit output */ double eqCrushHoldL,eqCrushHoldR; int eqCrushCnt;
     double glueEnvL,glueEnvR, tapeLimEnv;
@@ -1594,7 +1595,8 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     s->midiIn=0;s->midiOut=0;s->midiOutPrev=0;s->armThresh=0.08f;
     s->tapeNoise=0.5f;s->tapeDrive=0.0f;s->tapeHF=1.0f;s->tapeLoCut=0.0f;s->tapeWow=0.0f;s->tapeFlut=0.0f;s->tapeGen=0.0f;
     s->globalWowFlut=0.0f;s->inputMonitor=0.5f;s->inputGain=1.0f;s->gFlutNextMax=0.5;
-    bq_reset(&s->masterLo);bq_reset(&s->masterHi);
+    for(int k=0;k<3;k++){ bq_reset(&s->masterLo[k]); bq_reset(&s->masterHi[k]); }
+    s->loOneL=s->loOneR=s->hiOneL=s->hiOneR=0.0; s->loOneK=s->hiOneK=0.0; s->eqPoles=2;
     s->cpuPct=0.0; s->rootNote=60;   /* C3 plays the loop at its recorded speed */
     for(int i=0;i<NUM_PSLOTS;i++){s->pslot[i].idx=-1;bq_reset(&s->pslot[i].toneFilt);}
     for(int i=0;i<NUM_PUNCH;i++){s->punchParams[i][0]=0.5f;s->punchParams[i][1]=0.5f;s->punchParams[i][2]=1.0f;s->punchParams[i][3]=1.0f;s->punchPress[i]=0.0f;}
@@ -1954,7 +1956,12 @@ static const char *meq_opts[MEQ_N] = { "Off","962","Air","SSL","Neve","Trident",
  *       hold - the imaging is the sound), the MPC60 has a real 20 Hz-18 kHz output path, and
  *       the S950 runs a 6-pole 36 dB/oct MF6CN switched-capacitor filter whose cutoff the
  *       firmware locks to fc = fs*0.4 (Akai service manual voice block diagram). Built here
- *       as 3 cascaded biquads = 6th-order Butterworth. */
+ *       as 3 cascaded biquads = 6th-order Butterworth.
+ * poles: LoCut/HiCut order, so the Output filters behave like the selected machine's.
+ *       DOCUMENTED: Neve 1073 HPF 18 dB/oct, SSL (Origin, '242-derived) HPF 18 dB/oct,
+ *       Focusrite ISA 110 HPF and LPF both 18 dB/oct, API 550b/560 12 dB/oct, Akai S950
+ *       6-pole 36 dB/oct MF6CN. Trident publish no slope (Softube's emulation says ~12),
+ *       and the tape machines and E-mus publish none either - those stay at 2. */
 /* bits: converter word length, 0 = none (only the 12-bit samplers quantise).
  * clip: 0 = soft tanh (valve, transformer, tape), 1 = hard (a converter has a rail).
  * compand: quantise on a mu-law curve rather than linearly. The MPC60's service manual calls
@@ -1995,33 +2002,33 @@ static const char *meq_opts[MEQ_N] = { "Off","962","Air","SSL","Neve","Trident",
  * voicings and nowhere else; the console and tape models stay clean, because a console has no
  * interpolator to be dirty with. */
 
-static const double MEQ_DEF[MEQ_N][16] = {
+static const double MEQ_DEF[MEQ_N][17] = {
 
-    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 , 0.00,     0,0,0.00,0,0 },   /* Off — bypassed */
+    {   0,0,     0,0,0,        0,0,      0.00,     0, 0.0 , 0.00,     0,0,0.00,0,0,2 },   /* Off — bypassed */
 
-    {  40,-0.5,    0, 0.0,0.7, 16000,-0.7, 0.03,     0, -0.1 , 0.00,     0,0,0.00,0,0 },   /* Studer 961/962 desk — transparent by design (see note) */
+    {  40,-0.5,    0, 0.0,0.7, 16000,-0.7, 0.03,     0, -0.1 , 0.00,     0,0,0.00,0,0,2 },   /* Studer 961/962 desk — transparent by design (see note) */
 
-    {  95, 1.0, 2200,-0.8,0.8, 15000, 3.0, 0.06,     0, -0.6 , 0.00,     0,0,0.10,0,0 },   /* Air — ISA 110: 95/15k are reported shelf points; 2.2k inside its 600-6k band */
+    {  95, 1.0, 2200,-0.8,0.8, 15000, 3.0, 0.06,     0, -0.6 , 0.00,     0,0,0.10,0,0,3 },   /* Air — ISA 110: 95/15k are reported shelf points; 2.2k inside its 600-6k band */
 
-    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 , 0.00,     0,0,0.05,0,0 },   /* SSL bus — tight lows, present mids */
+    { 200,-1.0, 1500, 1.5,0.9,  9000, 1.5, 0.10,     0, -0.8 , 0.00,     0,0,0.05,0,0,3 },   /* SSL bus — tight lows, present mids */
 
-    { 110, 2.5,  700,-1.0,0.7, 12000, 3.5, 0.14,     0, -1.8 , 0.00,     0,0,0.08,0,0 },   /* Neve 1073 — 110 Hz/700 Hz/12 kHz are documented points; 3rd-harmonic dominant */
+    { 110, 2.5,  700,-1.0,0.7, 12000, 3.5, 0.14,     0, -1.8 , 0.00,     0,0,0.08,0,0,3 },   /* Neve 1073 — 110 Hz/700 Hz/12 kHz are documented points; 3rd-harmonic dominant */
 
-    {  80, 1.5, 1000, 1.5,1.3, 12000, 2.0, 0.16,     0, -1.2 , 0.00,     0,0,0.10,0,0 },   /* Trident A-Range — 80 Hz/1 kHz/12 kHz documented; Q 1.3; asym NOT documented */
+    {  80, 1.5, 1000, 1.5,1.3, 12000, 2.0, 0.16,     0, -1.2 , 0.00,     0,0,0.10,0,0,2 },   /* Trident A-Range — 80 Hz/1 kHz/12 kHz documented; Q 1.3; asym NOT documented */
 
-    {  60, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00,     0,0,0.10,0,0 },   /* Studer A800 — head bump ~60 Hz (measured siblings); Studer specs 3rd harmonic */
+    {  60, 1.5, 3500, 1.0,0.8, 12000, 2.5, 0.18,     0, -1.5 , 0.00,     0,0,0.10,0,0,2 },   /* Studer A800 — head bump ~60 Hz (measured siblings); Studer specs 3rd harmonic */
 
-    { 100, 1.0,  800, 2.5,1.1,  7000, 1.0, 0.20,     0, -1.6 , 0.00,     0,0,0.10,0,0 },   /* API 550A — 100/800/7k are documented switch points; prop-Q not modelled */
+    { 100, 1.0,  800, 2.5,1.1,  7000, 1.0, 0.20,     0, -1.6 , 0.00,     0,0,0.10,0,0,2 },   /* API 550A — 100/800/7k are documented switch points; prop-Q not modelled */
 
-    {  70, 2.0,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00,     0,0,0.12,0,0 },   /* Ampex ATR-102 — LF within its documented +/-2 dB bound; even-order is 1/3 of 3rd */
+    {  70, 2.0,  400, 0.5,0.6, 10000, 1.0, 0.40,     0, -2.4 , 0.00,     0,0,0.12,0,0,2 },   /* Ampex ATR-102 — LF within its documented +/-2 dB bound; even-order is 1/3 of 3rd */
 
-    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 40000, -1.2 , 0.25,    12,1,0.00,1,18000 },   /* MPC60 — 40 kHz, 16-bit conv + companded 12-bit, real 18 kHz output filter */
+    { 110, 3.0,  700, 0.5,0.7,  8000,-2.0, 0.24, 40000, -1.2 , 0.25,    12,1,0.00,1,18000,2 },   /* MPC60 — 40 kHz, 16-bit conv + companded 12-bit, real 18 kHz output filter */
 
-    {  90, 0.5, 1200, 0.0,0.8, 12000,-1.0, 0.26, 25000, -1.0 , 0.60,    12,1,0.00,0,10000 },   /* Akai S950 - 12-bit LINEAR (no companding); 6-pole MF6CN recon filter at fc = fs*0.4 */
+    {  90, 0.5, 1200, 0.0,0.8, 12000,-1.0, 0.26, 25000, -1.0 , 0.60,    12,1,0.00,0,10000,6 },   /* Akai S950 - 12-bit LINEAR (no companding); 6-pole MF6CN recon filter at fc = fs*0.4 */
 
-    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26040, -1.0 , 1.00,    12,1,0.00,0,0 },   /* SP-1200 — 26.04 kHz, 12-bit linear, NO recon filter, drop-sample */
+    {  80, 2.0, 1800,-1.5,0.8,  7000,-3.0, 0.30, 26040, -1.0 , 1.00,    12,1,0.00,0,0,2 },   /* SP-1200 — 26.04 kHz, 12-bit linear, NO recon filter, drop-sample */
 
-    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 26040, -0.6 , 1.00,    12,1,0.00,0,0 },   /* Emu SP-12 — same 26.04 kHz clock; darker fixed output filters */
+    {  70, 1.5, 2200,-1.0,0.9,  5500,-4.5, 0.34, 26040, -0.6 , 1.00,    12,1,0.00,0,0,2 },   /* Emu SP-12 — same 26.04 kHz clock; darker fixed output filters */
 
 };
 
@@ -2046,6 +2053,7 @@ static void master_eq_update(loopex_t *s){
     s->eqClip=(d[12]>0.5)?1:0;
     s->eqCompand=(d[14]>0.5)?1:0;
     s->eqBwHz=d[15];
+    s->eqPoles=(int)(d[16]+0.5); if(s->eqPoles<2)s->eqPoles=2; if(s->eqPoles>6)s->eqPoles=6;
     if(s->eqBwHz>100.0){   /* 6th-order Butterworth = three biquads at these Q's */
         static const double BQ[3]={0.51763809,0.70710678,1.93185165};
         double f=s->eqBwHz; if(f>SR*0.45)f=SR*0.45;
@@ -2282,8 +2290,17 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         int wantSide=(fv->filterSm<=0.5f)?-1:1;
         if(fabsf(fv->filter-fv->filterSm)>0.0002f || wantSide!=fv->djMode || fabsf(fv->djWet-fv->djWetTgt)>0.001f) dj_filter_update(fv); }   /* keep updating while a deferred LP<->HP swap or fade is still settling */
     if(selIdx>=0&&selIdx<NUM_VOICES){Voice *sv=&s->voice[selIdx];dj_filter_update(sv);studer_eq_update(sv);tilt_eq_update(sv);}
-    if(s->masterLoCut>21.0f)bq_set_hp(&s->masterLo,(double)s->masterLoCut,0.707);
-    if(s->masterHiCut<19999.0f)bq_set_lp(&s->masterHi,(double)s->masterHiCut,0.707);
+    /* Butterworth cascades at the order the selected machine actually uses. 3-pole needs a
+     * real pole alongside its quadratic, which is what the one-pole sections are for. */
+    { static const double Q2[1]={0.70710678}, Q3[1]={1.0},
+                          Q6[3]={0.51763809,0.70710678,1.93185165};
+      int np=s->eqPoles, nb=(np==6)?3:1; const double *qq=(np==6)?Q6:((np==3)?Q3:Q2);
+      if(s->masterLoCut>21.0f){ double f=(double)s->masterLoCut;
+          for(int k=0;k<nb;k++) bq_set_hp(&s->masterLo[k],f,qq[k]);
+          s->loOneK=1.0-exp(-TWOPI*f/SR); }
+      if(s->masterHiCut<19999.0f){ double f=(double)s->masterHiCut;
+          for(int k=0;k<nb;k++) bq_set_lp(&s->masterHi[k],f,qq[k]);
+          s->hiOneK=1.0-exp(-TWOPI*f/SR); } }
     OverdubMode odMode=(OverdubMode)(int)lb_clampf(s->overdubMode,0.0f,2.0f);
     poly_prep(s);   /* refresh keyboard-poly FX coeffs from their loops */
     if(s->scanTimer>0){ s->scanTimer-=frames; if(s->scanTimer<0)s->scanTimer=0; }
@@ -2441,9 +2458,31 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
          * Consequence to know: punch, Drift and Pump now receive the raw summed mix -
          * full bandwidth and unbounded, where global_saturate used to quietly clamp
          * everything downstream of it. */
-        mixL=global_saturate(mixL,(double)s->globalSat);mixR=global_saturate(mixR,(double)s->globalSat);
-        if(s->masterLoCut>21.0f){mixL=bq_L(&s->masterLo,mixL);mixR=bq_R(&s->masterLo,mixR);}
-        if(s->masterHiCut<19999.0f){mixL=bq_L(&s->masterHi,mixL);mixR=bq_R(&s->masterHi,mixR);}
+        /* gSat now sits immediately before Character, so it IS the drive into the machine -
+         * and it should therefore break up the way that machine does. Hard-clipping
+         * converters rail; valve/tape/console voicings bend, asymmetrically where the
+         * voicing says so. Off keeps the original sine-fold, which is its own colour. */
+        if(s->globalSat>=0.005f && s->masterEQ>MEQ_OFF){
+            double amt=(double)s->globalSat, dr=1.0+amt*4.0, a=(double)s->eqAsym*0.25;
+            double w=(amt<0.05)?amt/0.05:1.0;   /* blend in: no curve step off zero */
+            double c0,den,yL,yR;
+            if(s->eqClip){ c0=lb_clampd(a,-1.0,1.0); den=lb_clampd(dr+a,-1.0,1.0)-c0;
+                yL=(lb_clampd(mixL*dr+a,-1.0,1.0)-c0); yR=(lb_clampd(mixR*dr+a,-1.0,1.0)-c0); }
+            else{ c0=tanh(a); den=tanh(dr+a)-c0;
+                yL=(tanh(mixL*dr+a)-c0); yR=(tanh(mixR*dr+a)-c0); }
+            if(fabs(den)<1e-6)den=1e-6;
+            mixL+=(yL/den-mixL)*w; mixR+=(yR/den-mixR)*w;
+        } else { mixL=global_saturate(mixL,(double)s->globalSat);
+                 mixR=global_saturate(mixR,(double)s->globalSat); }
+        { int np=s->eqPoles, nb=(np==6)?3:1;
+          if(s->masterLoCut>21.0f){
+              for(int k=0;k<nb;k++){ mixL=bq_L(&s->masterLo[k],mixL); mixR=bq_R(&s->masterLo[k],mixR); }
+              if(np==3){ s->loOneL+=(mixL-s->loOneL)*s->loOneK; mixL-=s->loOneL;
+                         s->loOneR+=(mixR-s->loOneR)*s->loOneK; mixR-=s->loOneR; } }
+          if(s->masterHiCut<19999.0f){
+              for(int k=0;k<nb;k++){ mixL=bq_L(&s->masterHi[k],mixL); mixR=bq_R(&s->masterHi[k],mixR); }
+              if(np==3){ s->hiOneL+=(mixL-s->hiOneL)*s->hiOneK; mixL=s->hiOneL;
+                         s->hiOneR+=(mixR-s->hiOneR)*s->hiOneK; mixR=s->hiOneR; } } }
         master_character(s,&mixL,&mixR);     /* Settings: console/sampler colour */
         master_glue(s,&mixL,&mixR);          /* Settings: bus glue comp */
         mixL*=(double)s->masterVol; mixR*=(double)s->masterVol;   /* master output level */

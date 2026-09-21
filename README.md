@@ -13,7 +13,7 @@ and a MIDI-keyboard polyphony layer.
 > from the norns looper world (*wrms*, *cranes*, *oooooo*, *samsara*, *nydl*, *otis*).
 
 - **Module:** `loopex` · **Name:** Loopex · **Type:** Overtake (Schwung) · **API v2**
-- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.1 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
+- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.2 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
 
 ---
 
@@ -142,10 +142,16 @@ high feedback sustains without runaway.
 ### Sessions
 **64 numbered slots**, saved and loaded from the **≡ (Menu)** button, each named
 `slot_YYYYMMDD_HHMM`; saving over a used slot asks for confirmation. Settings *and*
-recorded audio are stored; all disk work runs on a `SCHED_OTHER` worker thread (`lpx-sio`) pinned
+recorded audio are stored — the audio as plain **16-bit stereo WAV** files (`sessionNN/sNN_loopNN.wav`, one per
+loop) that you can copy straight off the Move — the folder shows up in the Schwung Manager's file
+browser (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`); sessions from before 0.9.2
+are moved there and still load.
+**Clear** (K5 on the Sessions page) wipes all sixteen loops after a confirmation and leaves your
+settings alone; **Reset** (K6) returns the selected loop — its audio and every one of its settings —
+to factory defaults, also after a confirmation; all disk work runs on a `SCHED_OTHER` worker thread (`lpx-sio`) pinned
 to cores 0–2, never on the audio callback. A second worker, `lpx-ps`, runs the per-loop pitch
 shifters the same way. Sessions live in
-`/data/UserData/schwung/loopex-sessions/` so reinstalls keep them.
+`/data/UserData/UserLibrary/Loopex/` so reinstalls keep them.
 
 ### Perform, MIDI and I/O
 - **Perform menu (two pages):** page 1 — Stumble (probabilistic step glitch), Jump and **Scan**

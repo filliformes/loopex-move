@@ -74,8 +74,13 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   stereo, weighted-average sum).
 - **Drift** — 4 coprime delay lines with drifting taps and a Hadamard cross-mix; feedback capped
   below unity, silence bleed after ~8 s.
-- **Sessions** — 64 slots in `/data/UserData/schwung/loopex-sessions/`; **all disk I/O on a
-  `SCHED_OTHER` worker (`lpx-sio`) pinned to cores 0-2**, joined in `destroy_instance`. The
+- **Sessions** — 64 slots in `/data/UserData/UserLibrary/Loopex/`; **all disk I/O on a
+  `SCHED_OTHER` worker (`lpx-sio`) pinned to cores 0-2**, joined in `destroy_instance`. Audio is
+  `sessionNN/sNN_loopNN.wav` (both 1-based, as the pads and slots are numbered) (16-bit stereo WAV, interleaved on the worker in 4096-frame chunks; `wav_write`
+  / `wav_read`); pre-0.9.2 `tNN.raw` (L block then R block) is read as a fallback and removed once
+  a `.wav` has been written over it. Sessions page K5 = **Clear** (`clearAll`) and K6 = **Reset** (`resetSel`:
+  `voice_clear` + `voice_defaults`, the same function `create_instance` uses), both with the Del-style
+  confirm popup (K5 = NO / K8 = YES). The
   waveform display scan (`wave_compute`) and the Disintegration pass also run there.
 - **Pitch shifters** — Signalsmith Stretch **2048/512** (1024/256 was rejected by ear) on a second
   worker **`lpx-ps`** (SCHED_OTHER, cores 0-2, `sem_post` per block). Per-voice 16-block queue

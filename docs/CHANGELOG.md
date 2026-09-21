@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.9.2 — 2026-09-21
+
+- **Sessions live in the Move's UserLibrary and save loops as WAV.** Sessions moved from
+  `/data/UserData/schwung/loopex-sessions` to `/data/UserData/UserLibrary/Loopex` — where the
+  Schwung Manager's file browser shows them, next to Magnéto's recordings — and each loop is a plain
+  `sessionNN/sNN_loop01.wav` … `sNN_loop16.wav` (16-bit stereo 44.1 kHz; two-digit numbers so
+  the Manager's file browser sorts them). Existing sessions are moved on first launch (an atomic
+  rename, nothing copied) and every old `tNN.raw` is converted to WAV, then removed. (Thanks Hannes.)
+- **Clear** on the Sessions page (K5): wipes all sixteen loops after a confirmation, settings
+  untouched, header back to *New*. K5 is also *NO* inside the popup, so a second turn cancels
+  rather than wipes. (Thanks Hannes.)
+- **Reset** on the Sessions page (K6): the selected loop back to factory — audio (still undoable)
+  and every setting — after a confirmation. The defaults are the very same function
+  `create_instance` uses, so "reset" means exactly "as new". (Thanks Hannes.)
+
 ## v0.9.1 — 2026-09-20
 
 Fixes from the first day of user feedback on 0.8.7 / 0.9.0.

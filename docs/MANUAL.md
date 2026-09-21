@@ -1,6 +1,6 @@
 # Loopex Manual
 
-*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.1*
+*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.2*
 
 This is the full reference. The [README](../README.md) is the short tour.
 
@@ -138,7 +138,7 @@ Knobs 5–8 only follow a pad while it is physically held; latched pads keep run
 | Track 4 (page 2) | **Output** | Out | LoCut (20–1000 Hz) | HiCut | PWide (punch width) | Char | gSat (to 2.0) | Glue | Limit |
 | Capture | **Input Tape** | Tape Style | Drive | Wow | Flutter | HF | Lo Cut | Hiss | Generations |
 | Sample | **Drift** | Drift | Rate | Size | FBk | Supr | Blur | Damp | Mix |
-| ≡ (Menu) | **Sessions** | Slot | Save | Load | Del | | | | |
+| ≡ (Menu) | **Sessions** | Slot | Save | Load | Del | **Clear** | **Reset** | | |
 | ✕ (held) | **FX Seq** | Run | Speed | Length | Chance | Gate | Swing | Direction | Clear |
 
 Press the same button again, or **Back**, to close a menu. Enums step once per four detents so a fast turn does not race through the list.
@@ -228,9 +228,9 @@ Hold **Left** and the whole master brakes to a stop in about three seconds; hold
 
 ## 7. Sessions (≡ Menu button)
 
-Sixty-four slots. **Slot** browses (one slot per four detents), **Save** writes, **Load** reads, **Del** (K4) erases the slot. Saving over a used slot, or deleting one, asks first (K8 = yes, K5 = no, Back cancels). Each slot is named by date and time (`Sep 14 21:30` in the footer); the header shows which session is loaded, or **New**. A successful save shows a burst.
+Sixty-four slots. **Slot** browses (one slot per four detents), **Save** writes, **Load** reads, **Del** (K4) erases the slot, **Clear** (K5) wipes all sixteen loops — after a confirmation — and leaves every setting as it is (it is the loops, not the rig). **Reset** (K6) takes the *selected* loop back to factory: its audio (Undo can still bring it back) and every one of its settings — speed, filter, EQ, sends, playheads, HeadMix, all of it — after a confirmation. Saving over a used slot, or deleting one, asks first (K8 = yes, K5 = no, Back cancels). Each slot is named by date and time (`Sep 14 21:30` in the footer); the header shows which session is loaded, or **New**. A successful save shows a burst.
 
-A session holds every setting, the punch pad values, the FX-sequencer pattern and all recorded audio. Disk work runs on a worker thread pinned to cores 0–2, never on the audio callback. Files live in `/data/UserData/schwung/loopex-sessions/` and survive reinstalls.
+A session holds every setting, the punch pad values, the FX-sequencer pattern and all recorded audio. The audio is stored as plain **16-bit stereo 44.1 kHz WAV** files — `sessionNN/sNN_loop01.wav` … `sNN_loop16.wav`, one per loop — so you can copy them off the Move (`scp ableton@move.local:/data/UserData/UserLibrary/Loopex/session03/*.wav .`) and use them anywhere — or browse them in the Schwung Manager (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`). Sessions saved before 0.9.2 are moved there on first launch and still load. Disk work runs on a worker thread pinned to cores 0–2, never on the audio callback. Files live in `/data/UserData/UserLibrary/Loopex/` and survive reinstalls.
 
 ---
 

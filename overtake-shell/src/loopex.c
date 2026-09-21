@@ -551,6 +551,10 @@ typedef struct {
     int inSource;                          /* 0 Line, 1 Master, 2-5 = Schwung S1-4 (pub), 6-9 = Move M1-4 (link-in), 10 = own master out */
     int inChan;                            /* 0 Stereo, 1 Left->both, 2 Right->both, 3 Sum: a mono synth on one jack records to both sides */
     float tdCache; double tdG, tdMk;       /* tape Drive gain + makeup, recomputed when the knob moves */
+    float inLowFreq;                       /* input EQ low-shelf corner, 40-400 Hz log (0.9.3) */
+    /* Dynamic sampler (Capture button, 0.9.3): input-triggered capture into the pads.
+     * dynMode 0 Off · 1 Level · 2 Onset · 3 Phrase · 4 Pitch · 5 Novelty · 6 Clock */
+    int dynMode; float dynSense; int dynSize; int dynSpread; float dynError; float dynSustain;
     int inSrcLive;                         /* 1 when the selected source delivered audio this block; 0 = stem unavailable, fell back to Line */
     la_in_shm_t *laShm; int laFd; uint32_t laRead; int laSlotCur;   /* Link Audio track source (OG Move tracks) */
     bpa_shm_t *bpaShm; int bpaFd; uint32_t bpaRead; int bpaSlotCur; /* Schwung published stems source */
@@ -648,23 +652,112 @@ static void master_eq_update(loopex_t *s);   /* master character EQ (defined nea
 static int  get_param(void *inst, const char *key, char *buf, int buf_len);
 
 /* ---- Session store: settings blob + raw int16 loop buffers, 8 numbered slots ----
- * Layout: /data/UserData/schwung/loopex-sessions/slotN/{state.txt,meta.txt,tKK.raw}
+ * Layout: /data/UserData/UserLibrary/Loopex/sessionNN/{state.txt,meta.txt,name.txt,sNN_loopNN.wav}
+ * (UserLibrary is what the Schwung Manager's file browser shows, next to Magneto Recs; before
+ * 0.9.2 it was /data/UserData/schwung/loopex-sessions with tNN.raw - migrated on first scan)
  * (outside the module dir so reinstalls keep sessions — per the Overtake SDK). */
-#define SESS_DIR_BASE "/data/UserData/schwung/loopex-sessions"
+#define SESS_DIR_BASE "/data/UserData/UserLibrary/Loopex"
+#define SESS_DIR_OLD  "/data/UserData/schwung/loopex-sessions"   /* pre-0.9.2 location */
 #define NUM_SLOTS 64
 /* Worker-only: refresh the slot-name cache from disk. */
+/* One-time move of pre-0.9.2 sessions into UserLibrary. rename() within /data is an atomic
+ * directory move - nothing is copied, nothing can be half-moved. A slot that already exists
+ * at the new place is left alone. WORKER ONLY. */
+static int wav_write(const char *path,const int16_t *L,const int16_t *R,int len);   /* defined below, with wav_read */
+static int raw_to_wav(const char *raw,const char *wav){   /* WORKER ONLY: a 45 s loop is 7.9 MB, so malloc, not stack */
+    FILE *g=fopen(raw,"rb"); if(!g) return 0;
+    fseek(g,0,SEEK_END); long sz=ftell(g); fseek(g,0,SEEK_SET);
+    int len=(int)(sz/4); if(len<=0||len>LOOP_SAMPLES){ fclose(g); return 0; }
+    int16_t *L=(int16_t*)malloc((size_t)len*2u*sizeof(int16_t)); if(!L){ fclose(g); return 0; }
+    int16_t *R=L+len;
+    size_t gl=fread(L,sizeof(int16_t),(size_t)len,g), gr=fread(R,sizeof(int16_t),(size_t)len,g); fclose(g);
+    int ok=(gl==(size_t)len&&gr==(size_t)len)?wav_write(wav,L,R,len):0;
+    free(L); return ok;
+}
+/* Bring every older session up to the current layout. Idempotent, runs on every scan
+ * (create + after each session op), WORKER ONLY. Three generations to absorb:
+ *   <= 0.9.1      schwung/loopex-sessions/slotN/tNN.raw        (raw: L block then R block)
+ *   0.9.2 (first) UserLibrary/Loopex/slotN/loopNN.wav
+ *   0.9.2 (2nd)   UserLibrary/Loopex/sessionNN/sessionNN_loopNN.wav
+ *   0.9.2         UserLibrary/Loopex/sessionNN/sNN_loopNN.wav
+ * Folders and files move by rename() (atomic within /data); a .raw is converted and only
+ * then removed. sessionNN sorts correctly in the Manager's file browser; slot1/slot10/slot11
+ * did not. */
+static void session_migrate(void){
+    struct stat st; char a[352],b[352],p[352];
+    mkdir("/data/UserData/UserLibrary",0777); mkdir(SESS_DIR_BASE,0777);
+    for(int n=1;n<=NUM_SLOTS;n++){
+        snprintf(b,sizeof b,"%s/session%02d",SESS_DIR_BASE,n);
+        snprintf(a,sizeof a,"%s/slot%d",SESS_DIR_OLD,n);  if(stat(a,&st)==0 && stat(b,&st)!=0) rename(a,b);
+        snprintf(a,sizeof a,"%s/slot%d",SESS_DIR_BASE,n); if(stat(a,&st)==0 && stat(b,&st)!=0) rename(a,b);
+        if(stat(b,&st)!=0) continue;
+        for(int i=0;i<NUM_VOICES;i++){
+            snprintf(p,sizeof p,"%s/s%02d_loop%02d.wav",b,n,i+1);
+            snprintf(a,sizeof a,"%s/loop%02d.wav",b,i+1);                if(stat(a,&st)==0 && stat(p,&st)!=0) rename(a,p);
+            snprintf(a,sizeof a,"%s/session%02d_loop%02d.wav",b,n,i+1); if(stat(a,&st)==0 && stat(p,&st)!=0) rename(a,p);
+            snprintf(a,sizeof a,"%s/t%02d.raw",b,i);
+            if(stat(a,&st)==0){ int have=(stat(p,&st)==0); if(have || raw_to_wav(a,p)) remove(a); }
+        }
+    }
+    rmdir(SESS_DIR_OLD);   /* only succeeds once it is empty */
+}
 static void session_scan_names(loopex_t *s){
     char path[352];
+    session_migrate();
     for(int n=1;n<=NUM_SLOTS;n++){ s->sio.names[n][0]=0;
-        snprintf(path,sizeof path,"%s/slot%d/name.txt",SESS_DIR_BASE,n);
+        snprintf(path,sizeof path,"%s/session%02d/name.txt",SESS_DIR_BASE,n);
         FILE *f=fopen(path,"r");
-        if(!f){ snprintf(path,sizeof path,"%s/slot%d/state.txt",SESS_DIR_BASE,n);   /* saved before names existed: still a session */
+        if(!f){ snprintf(path,sizeof path,"%s/session%02d/state.txt",SESS_DIR_BASE,n);   /* saved before names existed: still a session */
                 FILE *g=fopen(path,"r"); if(g){ fclose(g); snprintf(s->sio.names[n],sizeof(s->sio.names[n]),"%02d_saved",n); } continue; }
         if(fgets(s->sio.names[n],(int)sizeof(s->sio.names[n]),f)){ size_t L=strlen(s->sio.names[n]);
             while(L&&(s->sio.names[n][L-1]=='\n'||s->sio.names[n][L-1]=='\r')) s->sio.names[n][--L]=0; }
         fclose(f); }
 }
 static void voice_disintegrate_pass(Voice *v);   /* fwd: worker runs it off-callback */
+/* ---- Session audio as WAV (WORKER ONLY - fopen/fwrite) ----------------------------------
+ * Sessions stored tNN.raw: 16-bit L block then R block, unusable anywhere else (user
+ * request). Now tNN.wav: canonical 44-byte RIFF, 16-bit PCM stereo 44100, interleaved in
+ * 4096-frame chunks off a stack buffer (no alloc). Load reads .wav and falls back to the
+ * old .raw, so every existing session keeps working. */
+static void wav_put32(uint8_t *p,uint32_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
+static void wav_put16(uint8_t *p,uint16_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
+static uint32_t wav_get32(const uint8_t *p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
+static uint16_t wav_get16(const uint8_t *p){ return (uint16_t)(p[0]|(p[1]<<8)); }
+static int wav_write(const char *path,const int16_t *L,const int16_t *R,int len){
+    FILE *g=fopen(path,"wb"); if(!g) return 0;
+    uint8_t h[44]; uint32_t data=(uint32_t)len*4u;
+    memcpy(h,"RIFF",4); wav_put32(h+4,36u+data); memcpy(h+8,"WAVE",4);
+    memcpy(h+12,"fmt ",4); wav_put32(h+16,16); wav_put16(h+20,1); wav_put16(h+22,2);
+    wav_put32(h+24,44100); wav_put32(h+28,44100u*4u); wav_put16(h+32,4); wav_put16(h+34,16);
+    memcpy(h+36,"data",4); wav_put32(h+40,data);
+    if(fwrite(h,1,44,g)!=44){ fclose(g); return 0; }
+    int16_t buf[4096*2]; int ok=1;
+    for(int i=0;i<len&&ok;i+=4096){ int n=len-i; if(n>4096)n=4096;
+        for(int j=0;j<n;j++){ buf[j*2]=L[i+j]; buf[j*2+1]=R[i+j]; }
+        ok=(fwrite(buf,sizeof(int16_t),(size_t)n*2,g)==(size_t)n*2); }
+    fclose(g); return ok;
+}
+/* 16-bit PCM, 1 or 2 channels, chunks in any order. Returns frames read; 0 = not usable. */
+static int wav_read(const char *path,int16_t *L,int16_t *R,int maxlen){
+    FILE *g=fopen(path,"rb"); if(!g) return 0;
+    uint8_t h[12]; if(fread(h,1,12,g)!=12||memcmp(h,"RIFF",4)||memcmp(h+8,"WAVE",4)){ fclose(g); return 0; }
+    int ch=0,bits=0,haveFmt=0; uint32_t dataLen=0;
+    for(;;){ uint8_t c[8]; if(fread(c,1,8,g)!=8) break; uint32_t sz=wav_get32(c+4);
+        if(!memcmp(c,"fmt ",4)){ uint8_t f[16]; if(sz<16||fread(f,1,16,g)!=16) break;
+            if(wav_get16(f)!=1) break; ch=wav_get16(f+2); bits=wav_get16(f+14); haveFmt=1;
+            if(sz>16) fseek(g,(long)(sz-16+(sz&1)),SEEK_CUR); }
+        else if(!memcmp(c,"data",4)){ dataLen=sz; break; }
+        else fseek(g,(long)(sz+(sz&1)),SEEK_CUR); }
+    if(!haveFmt||bits!=16||(ch!=1&&ch!=2)||dataLen==0){ fclose(g); return 0; }
+    int frames=(int)(dataLen/(uint32_t)(2*ch)); if(frames>maxlen)frames=maxlen;
+    int16_t buf[4096*2]; int got=0;
+    while(got<frames){ int n=frames-got; if(n>4096)n=4096;
+        size_t r=fread(buf,sizeof(int16_t),(size_t)n*(size_t)ch,g); int nr=(int)(r/(size_t)ch); if(nr<=0) break;
+        for(int j=0;j<nr;j++){ if(ch==2){ L[got+j]=buf[j*2]; R[got+j]=buf[j*2+1]; } else { L[got+j]=buf[j]; R[got+j]=buf[j]; } }
+        got+=nr; if(nr<n) break; }
+    fclose(g); return got;
+}
+
 
 /* Loop waveform for the display: 128 columns x (max,lo), scaled to the loop's own peak.
  * WORKER ONLY. For a 45 s loop this is ~15,000 scattered reads across a buffer far larger
@@ -771,19 +864,18 @@ static void *session_worker(void *arg){
         int req=atomic_exchange(&s->sio.request,0); if(!req) continue;
         int slot=atomic_load(&s->sio.slot);
         atomic_store(&s->sio.busy,1);
-        snprintf(dir,sizeof dir,"%s/slot%d",SESS_DIR_BASE,slot);
+        snprintf(dir,sizeof dir,"%s/session%02d",SESS_DIR_BASE,slot);
         if(req==1){                                   /* ---- SAVE ---- */
             atomic_store(&s->sio.status,1);
-            mkdir("/data/UserData/schwung",0777); mkdir(SESS_DIR_BASE,0777); mkdir(dir,0777);
+            mkdir("/data/UserData/UserLibrary",0777); mkdir(SESS_DIR_BASE,0777); mkdir(dir,0777);
             snprintf(path,sizeof path,"%s/state.txt",dir);
             FILE *f=fopen(path,"w"); if(f){ fputs(s->sio.stateBuf,f); fclose(f); }
             for(int i=0;i<NUM_VOICES;i++){
                 Voice *v=&s->voice[i]; int len=v->loopLen;
-                snprintf(path,sizeof path,"%s/t%02d.raw",dir,i);
-                if(len<=0){ remove(path); continue; }
-                FILE *g=fopen(path,"wb");
-                if(g){ fwrite(v->bufferL,sizeof(int16_t),(size_t)len,g);
-                       fwrite(v->bufferR,sizeof(int16_t),(size_t)len,g); fclose(g); }
+                char rawp[352]; snprintf(rawp,sizeof rawp,"%s/t%02d.raw",dir,i);   /* pre-0.9.2 format */
+                snprintf(path,sizeof path,"%s/s%02d_loop%02d.wav",dir,slot,i+1);   /* s01_loop01..loop16: the folder already says session */
+                if(len<=0){ remove(path); remove(rawp); continue; }
+                if(wav_write(path,v->bufferL,v->bufferR,len)) remove(rawp);   /* the .raw goes only once the .wav is safely written */
             }
             snprintf(path,sizeof path,"%s/meta.txt",dir);
             FILE *m=fopen(path,"w");
@@ -806,12 +898,15 @@ static void *session_worker(void *arg){
                 v->state=VS_EMPTY; v->loopLen=0;      /* render now skips this voice — safe to fill */
                 v->playPhase=0.0; v->playHead=0; v->playEnv=0.0; v->muted=0; v->glLastSlice=-1;
                 int len=lens[i]; if(len>LOOP_SAMPLES)len=LOOP_SAMPLES; if(len<=0) continue;
-                snprintf(path,sizeof path,"%s/t%02d.raw",dir,i);
-                FILE *g=fopen(path,"rb"); if(!g) continue;
-                size_t gl=fread(v->bufferL,sizeof(int16_t),(size_t)len,g);
-                size_t gr=fread(v->bufferR,sizeof(int16_t),(size_t)len,g);
-                fclose(g);
-                int n=(int)(gl<gr?gl:gr);
+                snprintf(path,sizeof path,"%s/s%02d_loop%02d.wav",dir,slot,i+1);
+                int n=wav_read(path,v->bufferL,v->bufferR,len);
+                if(n<=0){   /* pre-0.9.2 session: raw 16-bit, L block then R block */
+                    snprintf(path,sizeof path,"%s/t%02d.raw",dir,i);
+                    FILE *g=fopen(path,"rb"); if(!g) continue;
+                    size_t gl=fread(v->bufferL,sizeof(int16_t),(size_t)len,g);
+                    size_t gr=fread(v->bufferR,sizeof(int16_t),(size_t)len,g);
+                    fclose(g); n=(int)(gl<gr?gl:gr); }
+                if(n<=0) continue;
                 v->savedLoopLen=n;
                 __atomic_store_n(&v->loopLen,n,__ATOMIC_RELEASE);   /* publish length LAST, buffers first */
                 v->state=(sts[i]==VS_PLAYING||sts[i]==VS_OVERDUBBING)?VS_PLAYING:VS_PAUSED;
@@ -849,7 +944,10 @@ static void *session_worker(void *arg){
             snprintf(path,sizeof path,"%s/state.txt",dir); remove(path);
             snprintf(path,sizeof path,"%s/meta.txt",dir);  remove(path);
             snprintf(path,sizeof path,"%s/name.txt",dir);  remove(path);
-            for(int i=0;i<NUM_VOICES;i++){ snprintf(path,sizeof path,"%s/t%02d.raw",dir,i); remove(path); }
+            for(int i=0;i<NUM_VOICES;i++){ snprintf(path,sizeof path,"%s/s%02d_loop%02d.wav",dir,slot,i+1); remove(path);
+                                            snprintf(path,sizeof path,"%s/session%02d_loop%02d.wav",dir,slot,i+1); remove(path);
+                                            snprintf(path,sizeof path,"%s/loop%02d.wav",dir,i+1); remove(path);
+                                            snprintf(path,sizeof path,"%s/t%02d.raw",dir,i); remove(path); }
             rmdir(dir);
             session_scan_names(s);
             atomic_store(&s->sio.status,3);
@@ -1040,6 +1138,54 @@ static inline void master_wowflutter_stereo(loopex_t *s, double *l, double *r, d
 }
 
 /* ---- Voice Clear ---- */
+/* Every user-settable value of a loop, at its factory default. Used by create_instance and by
+ * Sessions > Reset (resetSel), so the two can never disagree. Settings only: buffers, RNG
+ * seeds and the pitch shifter are instance state and stay. Callback-safe. */
+static void voice_defaults(Voice *v) {
+    v->state=VS_EMPTY;v->loopStart=0.0f;v->loopEnd=1.0f;v->reverse=0.0f;v->retrigPend=0;v->muted=0;
+    for(int k=0;k<4;k++){ bq_reset(&v->aiLp[k]); v->aiCache[k]=-1.0f; }
+    v->pitch=0.0f;v->filter=0.5f;v->pan=0.0f;v->volume=0.8f;
+    v->saturation=0.0f;v->wowFlutter=0.0f;v->send=0.0f;v->sendB=0.0f;v->scatter=0.0f;v->glitch=0.0f;
+    v->tiltEQ=0.0f;v->decay=1.0f;v->eqBass=0.0f;v->eqPresFreq=0.5f;v->eqPresAmt=0.0f;v->eqTreble=0.0f;v->glLastSlice=-1;
+    v->djReso=0.0f;v->djWet=0.0f;v->djWetTgt=0.0f;v->ampAtk=0.0f;v->ampRel=0.0f;v->ampAtkCache=-1.0f;v->ampRelCache=-1.0f;v->lfModeCache=-99;v->lfG=0.5f;
+    v->comp=0.0f;v->clock=0.0f;   /* clock=0 lets an engaged shifter disengage through its own crossfade */
+    v->filterSm=0.5f;v->volSm=(double)v->volume;v->panSm=0.0;
+    /* heads: 1 on @1x, 2 off @0.5x, 3 off @2x, 4 off @1x  (spd: 0.5=1x, 0.25=0.5x, 0.75=2x) */
+    for(int k=0;k<4;k++){ v->ph[k].mode=0; v->ph[k].dir=1; v->ph[k].env=0.0; v->ph[k].phase=0.0; v->ph[k].spdCache=-1.0f; v->ph[k].jumpCd=0; }
+    v->ph[0].mode=1; v->ph[0].spd=0.5f; v->ph[0].env=1.0;
+    v->ph[1].spd=0.25f; v->ph[2].spd=0.75f; v->ph[3].spd=0.5f;
+    for(int k=0;k<4;k++){ v->hVol[k]=1.0f; v->hPan[k]=0.0f; }   /* per-head Vol unity, Pan center */
+    bq_reset(&v->djLpA);bq_reset(&v->djHpA);
+    bq_reset(&v->eqLow);bq_reset(&v->eqMid);bq_reset(&v->eqHigh);
+    bq_reset(&v->tiltLo);bq_reset(&v->tiltHi);
+    dj_filter_update(v);studer_eq_update(v);tilt_eq_update(v);
+}
+/* Randomise every user-settable value of a loop. amt=1 replaces each value with one drawn
+ * inside the knob's own range; amt<1 moves it that fraction of the way there (the Dynamic
+ * sampler's Error knob). Two musical guards: Volume 0.4-1 (a pad at 0 reads as broken) and
+ * a Start/End window of at least 5% (the boundary fade needs room). Head 1 stays on. The DJ
+ * filter re-tunes itself per block; the EQs are re-tuned here so non-selected loops follow
+ * too. Callback-safe: field writes and a few coefficient updates. */
+static void voice_randomize(Voice *v, double amt) {
+    #define RU01() (lb_rand(&v->rng)*0.5+0.5)
+    #define RF(field,lo,hi) do{ double r=(lo)+RU01()*((hi)-(lo)); v->field=(float)((double)v->field+(r-(double)v->field)*amt); }while(0)
+    #define RI(field,n)     do{ if(RU01()<amt){ int _m=(int)(RU01()*(n)); if(_m>=(n))_m=(n)-1; v->field=_m; } }while(0)
+    RF(pitch,-2.0,2.0); RF(filter,0.0,1.0); RF(pan,-1.0,1.0); RF(volume,0.4,1.0);
+    RF(loopStart,0.0,0.95); RF(loopEnd,0.05,1.0);
+    if(RU01()<amt) v->reverse=(RU01()<0.5)?0.0f:1.0f;
+    RF(send,0.0,1.0); RF(sendB,0.0,1.0); RF(clock,-2.0,2.0); RF(djReso,0.0,1.0);
+    RF(saturation,0.0,1.0); RF(comp,0.0,1.0); RF(wowFlutter,0.0,1.0); RF(scatter,0.0,1.0); RF(glitch,0.0,1.0);
+    RF(tiltEQ,-1.0,1.0); RF(eqBass,-1.0,1.0); RF(eqPresFreq,0.0,1.0); RF(eqPresAmt,-1.0,1.0); RF(eqTreble,-1.0,1.0);
+    RF(ampAtk,0.0,1.0); RF(ampRel,0.0,1.0);
+    for(int k=0;k<4;k++){ RF(ph[k].spd,0.0,1.0);
+        if(k==0){ if(RU01()<amt){ int m=1+(int)(RU01()*4.0); if(m>4)m=4; v->ph[0].mode=m; } }   /* head 1 never Off */
+        else RI(ph[k].mode,5); }
+    for(int k=1;k<4;k++){ RF(hVol[k],0.4,1.0); RF(hPan[k],-1.0,1.0); }
+    studer_eq_update(v); tilt_eq_update(v);
+    #undef RF
+    #undef RI
+    #undef RU01
+}
 static inline void voice_clear(Voice *v) {
     if(v->loopLen>0)v->savedLoopLen=v->loopLen;   /* remember for undo (buffer samples are kept) */
     v->state=VS_EMPTY;v->loopLen=0;v->recHead=0;v->playHead=0;v->playPhase=0.0;v->dubSamples=0;v->disintGen=0;
@@ -1858,30 +2004,16 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
         v->bufferL=(int16_t*)calloc(LOOP_SAMPLES,sizeof(int16_t));
         v->bufferR=(int16_t*)calloc(LOOP_SAMPLES,sizeof(int16_t));
         if(!v->bufferL||!v->bufferR){for(int j=0;j<=i;j++){free(s->voice[j].bufferL);free(s->voice[j].bufferR);}free(s);return NULL;}
-        v->state=VS_EMPTY;v->loopStart=0.0f;v->loopEnd=1.0f;v->reverse=0.0f;v->retrigPend=0;
-        for(int k=0;k<4;k++){ bq_reset(&v->aiLp[k]); v->aiCache[k]=-1.0f; }
-        v->pitch=0.0f;v->filter=0.5f;v->pan=0.0f;v->volume=0.8f;
-        v->saturation=0.0f;v->wowFlutter=0.0f;v->send=0.0f;v->glitch=0.0f;
-        v->tiltEQ=0.0f;v->decay=1.0f;v->eqBass=0.0f;v->eqPresFreq=0.5f;v->eqPresAmt=0.0f;v->eqTreble=0.0f;
-        v->flutNextMax=0.5;v->rng=12345+i*7919;v->ditRng=0x9E3779B9u+(uint32_t)i*2654435761u;v->glLastSlice=-1;
-        v->djReso=0.0f;v->djWet=0.0f;v->djWetTgt=0.0f;v->ampAtk=0.0f;v->ampRel=0.0f;v->ampAtkCache=-1.0f;v->ampRelCache=-1.0f;v->lfModeCache=-99;v->lfG=0.5f;
-        v->comp=0.0f;v->clock=0.0f;v->psCache=-99.0f;v->psActive=0;v->psMix=0.0;v->psNudge=0;
+        v->flutNextMax=0.5;v->rng=12345+i*7919;v->ditRng=0x9E3779B9u+(uint32_t)i*2654435761u;   /* instance state, not settings */
+        v->psCache=-99.0f;v->psActive=0;v->psMix=0.0;v->psNudge=0;
+        voice_defaults(v);   /* every user-settable value: shared with Sessions > Reset */
         /* Stagger the STFT hop phase so the 16 FFTs (one per 512-sample interval each) never
          * land in one callback. Interleaved, not consecutive: (i*512)/16 put loops 1-4 all in
          * the same 128-sample block phase, which is the common "Pitch on the first few loops"
          * case. i%4 picks the block phase, i/4 the offset inside it. Blocks are always 128,
          * which divides 512, so the phase set here holds for the life of the instance. */
         v->ps=ps_create(44100.0f,128,(i%4)*128+(i/4)*32);
-        v->filterSm=0.5f;v->volSm=(double)v->volume;v->panSm=0.0;
-        /* heads: 1 on @1x, 2 off @0.5x, 3 off @2x, 4 off @1x  (spd: 0.5=1x, 0.25=0.5x, 0.75=2x) */
-        for(int k=0;k<4;k++){ v->ph[k].mode=0; v->ph[k].dir=1; v->ph[k].env=0.0; v->ph[k].phase=0.0; v->ph[k].spdCache=-1.0f; v->ph[k].jumpCd=0; }
-        v->ph[0].mode=1; v->ph[0].spd=0.5f; v->ph[0].env=1.0;
-        v->ph[1].spd=0.25f; v->ph[2].spd=0.75f; v->ph[3].spd=0.5f;
-        for(int k=0;k<4;k++){ v->hVol[k]=1.0f; v->hPan[k]=0.0f; }   /* per-head Vol unity, Pan center */
-        bq_reset(&v->djLpA);bq_reset(&v->djHpA);
-        bq_reset(&v->eqLow);bq_reset(&v->eqMid);bq_reset(&v->eqHigh);
-        bq_reset(&v->tiltLo);bq_reset(&v->tiltHi);
-        dj_filter_update(v);studer_eq_update(v);tilt_eq_update(v);}
+    }
     s->globalSat=0.0f;s->masterComp=0.0f;s->masterLoCut=20.0f;s->masterHiCut=20000.0f;s->masterVol=1.0f;
     s->preamp=1.0f;s->overdubMode=1.0f;s->stability=0.0f;s->selTrack=1;s->rng=42;   /* 1 = Clean; overdub 1 = Multiply default */
     s->midiIn=0;s->midiOut=0;s->midiOutPrev=0;s->armThresh=0.08f;
@@ -1893,7 +2025,9 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     atomic_store(&s->waveReq,0); atomic_store(&s->waveRdy,-1); s->waveOutTrack[0]=s->waveOutTrack[1]=-1;   /* C3 plays the loop at its recorded speed */
     for(int i=0;i<NUM_PSLOTS;i++){s->pslot[i].idx=-1;bq_reset(&s->pslot[i].toneFilt);}
     for(int i=0;i<NUM_PUNCH;i++){s->punchParams[i][0]=0.5f;s->punchParams[i][1]=0.5f;s->punchParams[i][2]=1.0f;s->punchParams[i][3]=1.0f;s->punchPress[i]=0.0f;}
-    s->inLow=0.0f;s->inMid=0.0f;s->inMidFreq=0.5f;s->inHigh=0.0f;s->inHighFreq=0.5f;
+    s->inLow=0.0f;s->inMid=0.0f;s->inMidFreq=0.5f;s->inHigh=0.0f;s->inHighFreq=0.748f;   /* 0.748 on the log sweep = 10 kHz, the 424's shelf */
+    s->inLowFreq=0.39794f;   /* 40*10^0.398 = 100 Hz, the 424's shelf */
+    s->dynMode=0;s->dynSense=0.5f;s->dynSize=4;s->dynSpread=1;s->dynError=0.0f;s->dynSustain=1.0f;
     bq_reset(&s->inEqLo);bq_reset(&s->inEqMid);bq_reset(&s->inEqHi);bq_reset(&s->inTapeLp);bq_reset(&s->inTapeHp);
     bq_reset(&s->inBump); s->bumpCache=-1.0f;
     s->busA=pfx_create(44100.0f); s->busB=pfx_create(44100.0f); s->punchFx=pfx_create(44100.0f);
@@ -1992,13 +2126,20 @@ static void on_midi(void *inst, const uint8_t *msg, int len, int source) {
 
 /* ---- Input EQ (record chain) ---- */
 static void input_eq_update(loopex_t *s){
-    double lDb=(double)s->inLow*15.0, mDb=(double)s->inMid*11.0, hDb=(double)s->inHigh*15.0;
-    double mF=150.0*pow(7000.0/150.0,(double)s->inMidFreq), hF=3000.0+(double)s->inHighFreq*12000.0;
-    if(fabs(lDb)>0.1)bq_set_lowshelf(&s->inEqLo,120.0,lDb,0.7); else bq_reset(&s->inEqLo);
+    /* Input EQ (0.9.3): a blend of the Studer 962 presence band (150 Hz-7 kHz, the wider and
+     * more musical sweep) and the Tascam 424 MkII/MkIII channel EQ (100 Hz and 10 kHz shelf
+     * points, +-12 dB mid - owner's manual p.11/36, spec p.45): 2nd-order shelves +-15 dB
+     * with a sweepable low corner (40-400 Hz, default 100 = the 424's point) and a high
+     * corner 3-15 kHz (default 10 kHz), mid +-12 dB. Every sweep is log, so each octave
+     * gets the same knob travel. */
+    double lDb=(double)s->inLow*15.0, mDb=(double)s->inMid*12.0, hDb=(double)s->inHigh*15.0;
+    double lF=40.0*pow(10.0,(double)s->inLowFreq);                                                    /* 40 -> 400 Hz */
+    double mF=150.0*pow(7000.0/150.0,(double)s->inMidFreq), hF=3000.0*pow(5.0,(double)s->inHighFreq);   /* 3 -> 15 kHz */
+    if(fabs(lDb)>0.1)bq_set_lowshelf(&s->inEqLo,lF,lDb,0.7); else bq_reset(&s->inEqLo);
     if(fabs(mDb)>0.1)bq_set_peak(&s->inEqMid,mF,mDb,0.7); else bq_reset(&s->inEqMid);
     if(fabs(hDb)>0.1)bq_set_highshelf(&s->inEqHi,hF,hDb,0.7); else bq_reset(&s->inEqHi);
     if(s->tapeHF<0.99f){ double cut=2000.0*pow(20000.0/2000.0,(double)s->tapeHF); bq_set_lp(&s->inTapeLp,cut,0.707); }  /* tape HF rolloff */
-    if(s->tapeLoCut>0.01f){ bq_set_hp(&s->inTapeHp,20.0+(double)s->tapeLoCut*780.0,0.707); }                            /* tape low cut  */
+    if(s->tapeLoCut>0.01f){ bq_set_hp(&s->inTapeHp,20.0*pow(40.0,(double)s->tapeLoCut),0.707); }                          /* tape low cut, 20 -> 800 Hz log */
 }
 
 /* ---- Tape transport wobble on the RECORD path (Wow = slow, Flutter = fast) ---- */
@@ -2985,6 +3126,8 @@ static const char *preamp_opts[]={"Tapeless","Clean","Cass1","Cass2","VHS1","VHS
 static const char *odmode_opts[]={"Replace","Multiply","Disint"};
 static const char *insrc_opts[]={"Line","Master","S1","S2","S3","S4","M1","M2","M3","M4","Self"};
 static const char *inchan_opts[]={"Stereo","Left","Right","Sum"};
+static const char *dynmode_opts[]={"Off","Level","Onset","Phrase","Pitch","Novelty","Clock"};
+static const char *dynsize_opts[]={"1/16","1/8","1/4","1/2","1 bar","2 bars","4 bars","8 bars","Free"};
 static const char *midiin_opts[]={"Off","Keys","Ctrl"};   /* external MIDI: ignore / keyboard poly / LCXL control */
 static const char *reverse_opts[]={"Normal","Reverse"};
 static const char *stkind_opts[]={"Tumble","Stutter","Reverse","Tape","Gate","Crush"};
@@ -3157,7 +3300,11 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"overdubMode")==0){int idx=match_enum(val,odmode_opts,3);if(idx>=0)s->overdubMode=(float)idx;else s->overdubMode=lb_clampf((float)atof(val),0.0f,2.0f);return;}
     SETFR("stability",stability,0.0,1.0) SETFR("globalWowFlut",globalWowFlut,0.0,1.0) SETFR("inputMonitor",inputMonitor,0.0,1.0) SETFR("inputGain",inputGain,0.0,2.0)
     SETFR("inLow",inLow,-1.0,1.0) SETFR("inMid",inMid,-1.0,1.0) SETFR("inMidFreq",inMidFreq,0.0,1.0)
-    SETFR("inHigh",inHigh,-1.0,1.0) SETFR("inHighFreq",inHighFreq,0.0,1.0)
+    SETFR("inHigh",inHigh,-1.0,1.0) SETFR("inHighFreq",inHighFreq,0.0,1.0) SETFR("inLowFreq",inLowFreq,0.0,1.0)
+    SETFR("dynSense",dynSense,0.0,1.0) SETFR("dynError",dynError,0.0,1.0) SETFR("dynSustain",dynSustain,0.0,1.0)
+    if(strcmp(key,"dynMode")==0){ int i=match_enum(val,dynmode_opts,7); s->dynMode=(i>=0)?i:(int)lb_clampf((float)atof(val),0,6); return; }
+    if(strcmp(key,"dynSize")==0){ int i=match_enum(val,dynsize_opts,9); s->dynSize=(i>=0)?i:(int)lb_clampf((float)atof(val),0,8); return; }
+    if(strcmp(key,"dynSpread")==0){ s->dynSpread=(int)lb_clampf((float)atof(val),1,16); return; }
     SETFR("tapeNoise",tapeNoise,0.0,1.0) SETFR("tapeDrive",tapeDrive,0.0,1.0) SETFR("tapeHF",tapeHF,0.0,1.0)
     if(strcmp(key,"midiIn")==0){ int i=match_enum(val,midiin_opts,3); if(i<0)i=(strcmp(val,"On")==0)?1:(int)lb_clampf((float)atof(val),0,2); s->midiIn=i; return; }
     if(strcmp(key,"midiOut")==0){ s->midiOut=(strcmp(val,"On")==0||atof(val)>0.5)?1:0; return; }
@@ -3210,6 +3357,10 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"clearSel")==0){float t=(float)atof(val);if(t>0.5f){int ci=s->selTrack-1;
         if(ci>=0&&ci<NUM_VOICES)voice_clear(&s->voice[ci]);}return;}
     if(strcmp(key,"clearAll")==0){float t=(float)atof(val);if(t>0.5f){for(int ci=0;ci<NUM_VOICES;ci++)voice_clear(&s->voice[ci]);}return;}
+    if(strcmp(key,"rndSel")==0){ if(atof(val)>0.5){ int ci=s->selTrack-1; if(ci>=0&&ci<NUM_VOICES) voice_randomize(&s->voice[ci],1.0); } return; }   /* Dynamic > Rnd Pad */
+    if(strcmp(key,"rndAll")==0){ if(atof(val)>0.5){ for(int ci=0;ci<NUM_VOICES;ci++) voice_randomize(&s->voice[ci],1.0); } return; }                    /* Dynamic > Rnd All */
+    if(strcmp(key,"resetSel")==0){float t=(float)atof(val);if(t>0.5f){int ci=s->selTrack-1;   /* Sessions > Reset: audio (undoable) + every setting */
+        if(ci>=0&&ci<NUM_VOICES){ voice_clear(&s->voice[ci]); voice_defaults(&s->voice[ci]); }}return;}
     int selIdx=s->selTrack-1;if(selIdx<0||selIdx>=NUM_VOICES)return;Voice *v=&s->voice[selIdx];
     SETVFR("v_start",loopStart,0.0,1.0) SETVFR("v_end",loopEnd,0.0,1.0)
     if(strcmp(key,"v_reverse")==0){int idx=match_enum(val,reverse_opts,2);if(idx>=0)v->reverse=(float)idx;else v->reverse=lb_clampf((float)atof(val),0.0f,1.0f);return;}
@@ -3294,9 +3445,12 @@ static const char *UI_HIERARCHY_JSON =
     "\"v_clock\",\"v_djReso\",\"v_sat\",\"v_comp\",\"v_wowflut\",\"v_scatter\",\"v_glitch\",\"v_sendB\","
     "\"v_eqBass\",\"v_eqPresFrq\",\"v_eqPresAmt\",\"v_eqTreble\",\"v_tilt\",\"v_atk\",\"v_rel\"]},"
     "\"INPUT\":{\"label\":\"Input\","
-    "\"knobs\":[\"inputMonitor\",\"preamp\",\"inputGain\",\"inLow\",\"inMid\",\"inMidFreq\",\"inHigh\",\"inHighFreq\"],"
-    "\"params\":[\"inputMonitor\",\"preamp\",\"inputGain\",\"inLow\",\"inMid\",\"inMidFreq\",\"inHigh\",\"inHighFreq\","
-    "\"tapeDrive\",\"tapeWow\",\"tapeFlut\",\"tapeHF\",\"tapeLoCut\",\"tapeNoise\",\"tapeGen\"]},"
+    "\"knobs\":[\"inputMonitor\",\"preamp\",\"inputGain\",\"tapeDrive\",\"tapeWow\",\"tapeFlut\",\"tapeNoise\",\"tapeGen\"],"
+    "\"params\":[\"inputMonitor\",\"preamp\",\"inputGain\",\"tapeDrive\",\"tapeWow\",\"tapeFlut\",\"tapeNoise\",\"tapeGen\","
+    "\"tapeLoCut\",\"tapeHF\",\"inLowFreq\",\"inLow\",\"inMid\",\"inMidFreq\",\"inHigh\",\"inHighFreq\"]},"
+    "\"DYNAMIC\":{\"label\":\"Dynamic\","
+    "\"knobs\":[\"dynMode\",\"dynSense\",\"dynSize\",\"dynSpread\",\"dynError\",\"dynSustain\"],"
+    "\"params\":[\"dynMode\",\"dynSense\",\"dynSize\",\"dynSpread\",\"dynError\",\"dynSustain\"]},"
     "\"FX\":{\"label\":\"Global FX\","
     "\"knobs\":[\"sendAType\",\"sendAM1\",\"sendAM2\",\"sendADrift\",\"sendBType\",\"sendBM1\",\"sendBM2\",\"sendBDrift\"],"
     "\"params\":[\"sendAType\",\"sendAM1\",\"sendAM2\",\"sendADrift\",\"sendBType\",\"sendBM1\",\"sendBM2\",\"sendBDrift\","
@@ -3333,6 +3487,13 @@ static const char *CHAIN_PARAMS_JSON =
     "{\"key\":\"tapeWow\",\"name\":\"TpWow\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"tapeFlut\",\"name\":\"TpFlt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"tapeGen\",\"name\":\"TpGen\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+    "{\"key\":\"inLowFreq\",\"name\":\"LowF\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+    "{\"key\":\"dynMode\",\"name\":\"Dyn\",\"type\":\"enum\",\"options\":[\"Off\",\"Level\",\"Onset\",\"Phrase\",\"Pitch\",\"Novelty\",\"Clock\"]},"
+    "{\"key\":\"dynSense\",\"name\":\"Sense\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+    "{\"key\":\"dynSize\",\"name\":\"Size\",\"type\":\"enum\",\"options\":[\"1/16\",\"1/8\",\"1/4\",\"1/2\",\"1 bar\",\"2 bars\",\"4 bars\",\"8 bars\",\"Free\"]},"
+    "{\"key\":\"dynSpread\",\"name\":\"Spread\",\"type\":\"int\",\"min\":1,\"max\":16,\"step\":1},"
+    "{\"key\":\"dynError\",\"name\":\"Error\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
+    "{\"key\":\"dynSustain\",\"name\":\"Sustain\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"overdubMode\",\"name\":\"OdMode\",\"type\":\"enum\",\"options\":[\"Replace\",\"Multiply\",\"Disint\"]},"
     "{\"key\":\"inputGain\",\"name\":\"InGain\",\"type\":\"float\",\"min\":0,\"max\":2,\"step\":0.01},"
     "{\"key\":\"clearSel\",\"name\":\"ClrSel\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
@@ -3444,7 +3605,10 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
     GETE("preamp",preamp,preamp_opts,NUM_PREAMP); GETE("overdubMode",overdubMode,odmode_opts,3); GETE("inSource",inSource,insrc_opts,11); GETE("inChan",inChan,inchan_opts,4);
     if(strcmp(key,"inSrcLive")==0) return snprintf(buf,buf_len,"%d",s->inSrcLive); GETE("loopFiltMode",loopFilterMode,mfmode_opts,MF_NVOICE);
     GETP("stability",stability) GETP("globalWowFlut",globalWowFlut) GETP("inputMonitor",inputMonitor) GETP("inputGain",inputGain)
-    GETP("inLow",inLow) GETP("inMid",inMid) GETP("inMidFreq",inMidFreq) GETP("inHigh",inHigh) GETP("inHighFreq",inHighFreq)
+    GETP("inLow",inLow) GETP("inMid",inMid) GETP("inMidFreq",inMidFreq) GETP("inHigh",inHigh) GETP("inHighFreq",inHighFreq) GETP("inLowFreq",inLowFreq)
+    GETP("dynSense",dynSense) GETP("dynError",dynError) GETP("dynSustain",dynSustain)
+    GETE("dynMode",dynMode,dynmode_opts,7); GETE("dynSize",dynSize,dynsize_opts,9);
+    if(strcmp(key,"dynSpread")==0) return snprintf(buf,buf_len,"%d",s->dynSpread);
     GETP("tapeNoise",tapeNoise) GETP("tapeDrive",tapeDrive) GETP("tapeHF",tapeHF)
     if(strcmp(key,"midiIn")==0){ int i=s->midiIn; if(i<0||i>2)i=0; return snprintf(buf,buf_len,"%s",midiin_opts[i]); }
     if(strcmp(key,"midiOut")==0)return snprintf(buf,buf_len,"%s",s->midiOut?"On":"Off");
@@ -3460,7 +3624,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
     if(strcmp(key,"jump")==0||strcmp(key,"scan")==0)return snprintf(buf,buf_len,"0");
     if(strcmp(key,"inputPeak")==0)return snprintf(buf,buf_len,"%.3f",fmax(s->inputPeakL,s->inputPeakR));
     if(strcmp(key,"selTrack")==0)return snprintf(buf,buf_len,"%d",s->selTrack);
-    if(strcmp(key,"clearSel")==0||strcmp(key,"clearAll")==0)return snprintf(buf,buf_len,"0");
+    if(strcmp(key,"clearSel")==0||strcmp(key,"clearAll")==0||strcmp(key,"resetSel")==0||strcmp(key,"rndSel")==0||strcmp(key,"rndAll")==0)return snprintf(buf,buf_len,"0");
 
     int selIdx=s->selTrack-1;if(selIdx<0||selIdx>=NUM_VOICES)return -1;Voice *v=&s->voice[selIdx];
     GETVP("v_start",loopStart) GETVP("v_end",loopEnd)
@@ -3521,7 +3685,8 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
             (double)s->punchLfo[pi][0],(double)s->punchLfo[pi][1],(double)s->punchLfo[pi][2],(double)s->punchLfo[pi][3]);
         /* Input / Tape chain */
         WF("inLow",s->inLow);WF("inMid",s->inMid);WF("inMidFreq",s->inMidFreq);
-        WF("inHigh",s->inHigh);WF("inHighFreq",s->inHighFreq);
+        WF("inHigh",s->inHigh);WF("inHighFreq",s->inHighFreq);WF("inLowFreq",s->inLowFreq);
+        WI("dynMode",s->dynMode);WF("dynSense",s->dynSense);WI("dynSize",s->dynSize);WI("dynSpread",s->dynSpread);WF("dynError",s->dynError);WF("dynSustain",s->dynSustain);
         WF("tapeNoise",s->tapeNoise);WF("tapeDrive",s->tapeDrive);WF("tapeHF",s->tapeHF);
         WI("midiIn",s->midiIn);WI("midiOut",s->midiOut);WF("armThresh",s->armThresh);WF("tapeLoCut",s->tapeLoCut);WF("tapeWow",s->tapeWow);WF("tapeFlut",s->tapeFlut);WF("tapeGen",s->tapeGen);
         /* Master + keyboard */

@@ -414,7 +414,7 @@
 <section id="sessions">
   <div class="eyebrow">Sessions</div>
   <h2>Save the whole rig</h2>
-  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot. Saving over a used slot, or deleting one, asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback; a second background thread runs the per-loop pitch shifters. Sessions live under <code>/data/UserData/schwung/loopex-sessions/</code> and survive reinstalls.</p>
+  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot; <b>Clear</b> (K5) wipes all sixteen loops and leaves your settings alone; <b>Reset</b> (K6) returns the selected loop &mdash; audio and every setting &mdash; to factory. Saving over a used slot, deleting one, clearing or resetting asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback; a second background thread runs the per-loop pitch shifters. Sessions live under <code>/data/UserData/UserLibrary/Loopex/</code> and survive reinstalls. The audio is stored as plain 16-bit stereo WAV files, one per loop (<code>sessionNN/sNN_loop01.wav</code> &hellip;), so you can copy them off the Move and use them anywhere.</p>
 </section>
 
 <section id="cheat">

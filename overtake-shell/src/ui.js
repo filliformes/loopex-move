@@ -141,16 +141,20 @@ function punchLfoDisp(j, v) { const e = punchLfoEnum(j); return e ? e.disp(e.fro
 
 /* ---- Track-button menus (MoveRow1..4) ---- */
 const ROW_CCS = [MoveRow1, MoveRow2, MoveRow3, MoveRow4];   /* Track buttons 1..4 */
-const MENU_NAMES = ['Input FX', 'Perform', 'Send FX', 'Settings', 'Input Tape', 'Sessions', 'FX Seq', 'Drift'];
+const MENU_NAMES = ['Input', 'Perform', 'Send FX', 'Settings', 'Dynamic', 'Sessions', 'FX Seq', 'Drift'];
 const CHANCE_NAMES = ['Always','10%','20%','30%','40%','50%','60%','70%','80%','90%','LikeLast','P1 S1','P2 S1','S1 P1'];
 const PFX_NAMES = ['Off','Drive','Sweeten','Fuzz','Howl','Fold','Swell','Doubler','Vibrato','Phaser','Tremolo','Pitch','Shift',
                    'Cascade','Reels','Collage','Reverse','Space','Bloom','Filter','Squash','Cassette','Broken','Interference','Halo','Plate','Quartz','Prism','Veil'];
 const PREAMP_NAMES = ['Tapeless','Clean','Cass1','Cass2','VHS1','VHS2','Reel15','Reel7','Reel3','4trk','Porta','Dub','Warp'];
 const MEQ_NAMES = ['Off','962','Air','SSL','Neve','Trident','Studer','API','Ampex','MPC','S950','SP12','Emu'];
 const MENU_DEFS = [
-    [ /* Track 1 — Input FX */
-      { k:'inputMonitor', lo:0, hi:1, lbl:'Mon' },    { k:'preamp', opts:PREAMP_NAMES, lbl:'Style' },
-      { k:'inputGain', lo:0, hi:2, lbl:'Trim' },      { k:'inLow', lo:-1, hi:1, lbl:'Low' },
+    [ /* Track 1 — Input: p1 Input Tape (the machine), p2 Input EQ (0.9.3: Input FX + Input Tape merged) */
+      { k:'inputMonitor', lo:0, hi:1, lbl:'Mon' },    { k:'preamp', opts:PREAMP_NAMES, lbl:'Tape' },
+      { k:'inputGain', lo:0, hi:2, lbl:'Trim' },      { k:'tapeDrive', lo:0, hi:1, lbl:'Drive' },
+      { k:'tapeWow', lo:0, hi:1, lbl:'Wow' },         { k:'tapeFlut', lo:0, hi:1, lbl:'Flut' },
+      { k:'tapeNoise', lo:0, hi:1, lbl:'Hiss' },      { k:'tapeGen', lo:0, hi:1, lbl:'Gen' },
+      { k:'tapeLoCut', lo:0, hi:1, lbl:'LoCut' },     { k:'tapeHF', lo:0, hi:1, lbl:'HF' },
+      { k:'inLowFreq', lo:0, hi:1, lbl:'LowF' },      { k:'inLow', lo:-1, hi:1, lbl:'Low' },
       { k:'inMid', lo:-1, hi:1, lbl:'Mid' },          { k:'inMidFreq', lo:0, hi:1, lbl:'MidF' },
       { k:'inHigh', lo:-1, hi:1, lbl:'High' },        { k:'inHighFreq', lo:0, hi:1, lbl:'HiF' },
     ],
@@ -181,17 +185,21 @@ const MENU_DEFS = [
       { k:'masterEQ', opts:MEQ_NAMES, lbl:'Char' },   { k:'globalSat', lo:0, hi:2, lbl:'gSat' },
       { k:'masterGlue', lo:0, hi:1, lbl:'Glue' },     { k:'tapeLimit', lo:0, hi:1, lbl:'Limit' },
     ],
-    [ /* 4 — Tape (Capture button): the record-path tape machine, Magneto-style */
-      { k:'preamp', opts:PREAMP_NAMES, lbl:'Tape' },  { k:'tapeDrive', lo:0, hi:1, lbl:'Drive' },
-      { k:'tapeWow', lo:0, hi:1, lbl:'Wow' },         { k:'tapeFlut', lo:0, hi:1, lbl:'Flut' },
-      { k:'tapeHF', lo:0, hi:1, lbl:'HF' },           { k:'tapeLoCut', lo:0, hi:1, lbl:'LoCut' },
-      { k:'tapeNoise', lo:0, hi:1, lbl:'Hiss' },      { k:'tapeGen', lo:0, hi:1, lbl:'Gen' },
+    [ /* 4 — Dynamic (Capture button): the input plays the sampler (Onward / Continua), plus the randomiser */
+      { k:'dynMode', opts:['Off','Level','Onset','Phrase','Pitch','Novelty','Clock'], lbl:'Dyn' },
+      { k:'dynSense', lo:0, hi:1, lbl:'Sense' },
+      { k:'dynSize', opts:['1/16','1/8','1/4','1/2','1 bar','2 bars','4 bars','8 bars','Free'], lbl:'Size' },
+      { k:'dynSpread', lo:1, hi:16, lbl:'Spread', int:true },
+      { k:'dynError', lo:0, hi:1, lbl:'Error' },      { k:'dynSustain', lo:0, hi:1, lbl:'Sustn' },
+      { k:'rndSel', trig:true, lbl:'RndPad' },        { k:'rndAll', trig:true, lbl:'RndAll' },
     ],
     [ /* 5 — Sessions (Rec button): slot select + save/load (worker thread does the disk I/O) */
       { k:'sessSlot', lo:1, hi:64, lbl:'Slot', int:true, local:true },
       { k:'sessSave', trig:true, lbl:'Save' },
       { k:'sessLoad', trig:true, lbl:'Load' },
       { k:'sessDelete', trig:true, lbl:'Del' },
+      { k:'sessClear', trig:true, lbl:'Clear' },   /* K5 on purpose: inside a popup K5 is NO, so a second turn cancels instead of wiping */
+      { k:'sessReset', trig:true, lbl:'Reset' },   /* K6: the selected pad back to factory - audio and every setting - after a confirm */
     ],
     [ /* 6 — FX Seq (Delete button): one shared 16-step pattern of punch pads (MESS-style) */
       { k:'fxseqRun', opts:['Off','On'], lbl:'Run' },        { k:'fxseqSpeed', opts:['1/32','1/16','1/8T','1/8','1/4','1/2','1'], lbl:'Speed' },
@@ -210,7 +218,7 @@ const MENU_DEFS = [
 let delHeld = false, delUsed = false, delDownAt = 0;   /* Delete (X) held: gestures; a quick lone tap toggles Run */
 const delPads = [];                                  /* punch pads pressed while X is held: selection only, no sound */
 let delStepHeld = -1;                                /* step held with X: locks / chance edit, extension anchor */
-let seqRun = false, fxPos = -1, defaultChance = 0, confirmClear = false;
+let seqRun = false, fxPos = -1, defaultChance = 0, confirmClear = false, confirmWipe = false, confirmReset = false;   /* confirmWipe: Sessions > Clear (all loops); confirmReset: Sessions > Reset (selected pad) */
 const stepMirror = [];                               /* UI copy of the DSP pattern, for LEDs and lock editing */
 for (let i = 0; i < 16; i++) stepMirror.push({ n: 0, ext: 0, chance: 0, pads: [], locks: [], press: [] });
 function parseStepMirror(i, r) {
@@ -275,7 +283,7 @@ function pollSessNames() {
     const parts = String(r).split(';');
     for (let i = 1; i <= NSLOTS; i++) sessNames[i] = parts[i - 1] || '';
 }
-function cancelPopups() { confirmSave = false; confirmClear = false; confirmDelete = false; }
+function cancelPopups() { confirmSave = false; confirmClear = false; confirmDelete = false; confirmWipe = false; confirmReset = false; }
 function doSessionSave() {
     sp('session', 'save:' + sessSlot); setMsg('Saving slot ' + sessSlot); confirmSave = false; sessPending = 'save'; sessPendSlot = sessSlot; sessLast = '';
 }
@@ -306,16 +314,24 @@ function jogVelocity() {
 let waveStr = '', headsStr = '';
 let waveStart = 0, waveEnd = 1;   /* current loop trim, for the waveform markers */
 let driftMixOn = false;           /* Drift Mix > 0.1 -> the Sample LED glows */
+let dynOn = false, dynLast = 'Level', captureDownAt = 0, captureLong = false;   /* Dynamic sampler: LED mirror + the long-press toggle's remembered mode */
+const CAPTURE_LONG_MS = 600;
+function toggleDyn() {
+    const dm = gp('dynMode') || 'Off';
+    if (dm !== 'Off') { dynLast = dm; sp('dynMode', 'Off'); dynOn = false; setMsg('Dynamic off'); }
+    else { sp('dynMode', dynLast); dynOn = true; setMsg('Dynamic: ' + dynLast); }
+    paintNav(); if (menu === 4) menuReload = true;
+}
 let clkMusic = true;              /* Master Clock mode: Music (snap) vs Free */
 const MCLK_SEMI_UI = [-24,-19,-17,-12,-7,-5,0,5,7,12,17,19,24];   /* mirrors MCLK_SEMI in the DSP */
 function showView(v) { view = v; viewUntil = now() + VIEW_MS; dirty = true; }
 const LOOP_MULTS = [1.0, 0.5, 0.25, 0.125];
 const loopMultIdx = new Array(NV).fill(0);
 let menu = -1, menuReload = false, menuPage = 0;
-const MENU_PAGED = { 1: true, 3: true };   /* Perform + Settings have a 2nd knob page */
+const MENU_PAGED = { 0: true, 1: true, 3: true };   /* Input, Perform + Settings have a 2nd knob page */
 /* Per-page titles where the two pages are different things. Settings p1 is behaviour and
    I/O; p2 is the output machine, so calling the whole menu 'Output' would mislabel p1. */
-const MENU_PAGE_NAMES = { 3: ['Settings', 'Output'] };
+const MENU_PAGE_NAMES = { 0: ['Input Tape', 'Input EQ'], 3: ['Settings', 'Output'] };
 function curMenuDefs() { const d = MENU_DEFS[menu]; if (!d) return null; return MENU_PAGED[menu] ? d.slice(menuPage * 8, menuPage * 8 + 8) : d; }
 function menuPages() { const d = MENU_DEFS[menu]; return (d && MENU_PAGED[menu]) ? Math.ceil(d.length / 8) : 1; }
 const menuVals = [0,0,0,0,0,0,0,0];
@@ -425,7 +441,8 @@ function paintNav() {
     setButtonLED(MoveUp,    loopPage > 0 ? WhiteLedBright : WhiteLedDim, true);
     setButtonLED(MoveUndo,  WhiteLedDim, true);
     setButtonLED(MoveMute,  muteHeld ? WhiteLedBright : WhiteLedDim, true);
-    setButtonLED(MoveCapture, menu === 4 ? WhiteLedBright : WhiteLedDim, true);
+    /* The Capture LED is white-only, so 'listening' is a ~1 Hz blink rather than a colour. */
+    setButtonLED(MoveCapture, dynOn ? (((tickCount / 20) & 1) ? WhiteLedBright : WhiteLedDim) : (menu === 4 ? WhiteLedBright : WhiteLedDim), true);
     setButtonLED(MoveSample,  menu === 7 ? WhiteLedBright : (driftMixOn ? WhiteLedDim : WhiteLedOff), true);
     setButtonLED(MoveMenu,    menu === 5 ? WhiteLedBright : WhiteLedDim, true);
     setButtonLED(MoveCopy,    copyHeld ? WhiteLedBright : WhiteLedDim, true);
@@ -472,13 +489,15 @@ function reloadMenu() {
     menuReload = false;
 }
 function menuKnob(k, delta) {
-    if (confirmSave || confirmClear || confirmDelete) {   /* popup: knob 8 = YES, knob 5 = NO (those cells have no def, so check first) */
+    if (confirmSave || confirmClear || confirmDelete || confirmWipe || confirmReset) {   /* popup: knob 8 = YES, knob 5 = NO (those cells have no def, so check first) */
         if (delta === 0) return;
         if (k === 7) { stampButton(k);
             if (confirmClear) { confirmClear = false; sp('fxseqClear', '1'); for (let i = 0; i < 16; i++) clearStep(i); setMsg('Pattern cleared'); paintSteps(); }
+            else if (confirmWipe) { confirmWipe = false; sp('clearAll', '1'); sessCurrent = 0; setMsg('All loops cleared'); }   /* settings stay: it is the loops, not the rig */
+            else if (confirmReset) { confirmReset = false; sp('resetSel', '1'); needReload = true; setMsg('Pad ' + (sel + 1) + ' reset'); }   /* audio + every setting of the selected pad */
             else if (confirmDelete) { doSessionDelete(); }
             else doSessionSave(); }
-        else if (k === 4) { stampButton(k); confirmSave = false; confirmClear = false; confirmDelete = false; setMsg('cancelled'); }
+        else if (k === 4) { stampButton(k); confirmSave = false; confirmClear = false; confirmDelete = false; confirmWipe = false; confirmReset = false; setMsg('cancelled'); }
         dirty = true; return;
     }
     if (menu === 6 && delStepHeld >= 0 && k >= 4 && stepMirror[delStepHeld].n > 0) {   /* X + step + knobs 5-8: locks of the step's first effect */
@@ -508,7 +527,11 @@ function menuKnob(k, delta) {
                 else doSessionSave();
             }
             else if (d.k === 'sessLoad') { sp('session', 'load:' + sessSlot); setMsg('Loading slot ' + sessSlot); sessPending = 'load'; sessPendSlot = sessSlot; sessLast = ''; }
+            else if (d.k === 'rndSel') { sp('rndSel', '1'); needReload = true; setMsg('Pad ' + (sel + 1) + ' randomized'); }   /* no confirm: a performance gesture */
+            else if (d.k === 'rndAll') { sp('rndAll', '1'); needReload = true; setMsg('All pads randomized'); }
             else if (d.k === 'sessDelete') { if (sessNames[sessSlot]) { confirmDelete = true; setMsg('delete slot ' + sessSlot + '?'); } else setMsg('slot ' + sessSlot + ' empty'); }
+            else if (d.k === 'sessClear') { confirmWipe = true; setMsg('clear all loops?'); }
+            else if (d.k === 'sessReset') { confirmReset = true; setMsg('reset pad ' + (sel + 1) + '?'); }
             else if (d.k === 'fxseqClear') { confirmClear = true; setMsg('clear pattern?'); }
             else sp(d.k, '1');
             lastKnob = k; lastKnobLbl = d.lbl; lastKnobVal = 'fire';
@@ -1047,7 +1070,8 @@ const FULL_NAMES = {
     v_ph3mode: 'Head 3 Mode', v_ph3spd: 'Head 3 Speed', v_ph4mode: 'Head 4 Mode', v_ph4spd: 'Head 4 Speed',
     v_hvol2: 'Head 2 Vol', v_hpan2: 'Head 2 Pan', v_hvol3: 'Head 3 Vol', v_hpan3: 'Head 3 Pan',
     v_hvol4: 'Head 4 Vol', v_hpan4: 'Head 4 Pan',
-    inChan: 'Input Channels', inputMonitor: 'Monitor', preamp: 'Tape Style', inputGain: 'Input Gain', inLow: 'Input Low', inMid: 'Input Mid',
+    inChan: 'Input Channels', inputMonitor: 'Monitor', preamp: 'Tape Style', inLowFreq: 'Low Freq',
+    dynMode: 'Dynamic Mode', dynSense: 'Sense', dynSize: 'Capture Size', dynSpread: 'Spread', dynError: 'Error', dynSustain: 'Sustain', rndSel: 'Randomize Pad', rndAll: 'Randomize All', inputGain: 'Input Gain', inLow: 'Input Low', inMid: 'Input Mid',
     inMidFreq: 'Input Mid Freq', inHigh: 'Input High', inHighFreq: 'Input High Freq',
     sendAType: 'Send A FX', sendAM1: 'Send A Amount', sendAM2: 'Send A Macro', sendADrift: 'Send A Drift',
     sendBType: 'Send B FX', sendBM1: 'Send B Amount', sendBM2: 'Send B Macro', sendBDrift: 'Send B Drift',
@@ -1057,7 +1081,7 @@ const FULL_NAMES = {
     masterHiCut: 'Master Hi Cut', globalSat: 'Global Sat', midiIn: 'MIDI In', armThresh: 'Arm Threshold',
     tapeDrive: 'Tape Drive', tapeWow: 'Tape Wow', tapeFlut: 'Tape Flutter', tapeHF: 'Tape HF Loss',
     tapeLoCut: 'Tape Lo Cut', tapeNoise: 'Tape Noise', tapeGen: 'Generations',
-    sessSlot: 'Session Slot', sessSave: 'Save Session', sessLoad: 'Load Session',
+    sessSlot: 'Session Slot', sessSave: 'Save Session', sessLoad: 'Load Session', sessClear: 'Clear All Loops', sessReset: 'Reset Current Pad',
     fxseqRun: 'FX Seq Run', fxseqSpeed: 'Step Speed', fxseqLen: 'Pattern Length', fxseqChance: 'Play Chance',
     fxseqGate: 'Gate', fxseqSwing: 'Swing', fxseqDir: 'Direction', fxseqClear: 'Clear Pattern',
     mfCut: 'Master Cut', mfReso: 'Master Reso', mfMode: 'Filter Mode', mClock: 'Master Clock',
@@ -1072,8 +1096,8 @@ function drawKnobView() {
     const ctx = screenCtx();
     const inPunch = (menu < 0 && punchMode && punchActive >= 0);
     let defs, title, scope;
-    if (confirmSave || confirmClear || confirmDelete) {      /* confirm popup, drawn as two buttons */
-        drawHeader(ctx, confirmClear ? 'CLEAR FX PATTERN?' : confirmDelete ? 'DELETE SLOT ' + sessSlot + '?' : 'OVERWRITE SLOT ' + sessSlot + '?', null, true);
+    if (confirmSave || confirmClear || confirmDelete || confirmWipe || confirmReset) {      /* confirm popup, drawn as two buttons */
+        drawHeader(ctx, confirmReset ? 'RESET PAD ' + (sel + 1) + '?' : confirmWipe ? 'CLEAR ALL LOOPS?' : confirmClear ? 'CLEAR FX PATTERN?' : confirmDelete ? 'DELETE SLOT ' + sessSlot + '?' : 'OVERWRITE SLOT ' + sessSlot + '?', null, true);
         if (confirmSave || confirmDelete) fontPrint4x5(ctx, 2, 11, caps(prettySess(sessNames[sessSlot] || '')), 1);
         drawFooter(ctx, [['K5', 'NO'], ['K8', 'YES']]);
         for (const [i, lbl] of [[4, 'NO'], [7, 'YES']]) {
@@ -1324,6 +1348,9 @@ globalThis.tick = function () {
         const src = gp('inSource'), live = gp('inSrcLive');
         if (src && live === '0' && /^[SM][1-4]$/.test(src)) setMsg(src + ' unavailable - using Line');
     }
+    if (captureDownAt && !captureLong && now() - captureDownAt >= CAPTURE_LONG_MS) { captureLong = true; toggleDyn(); }
+    if (dynOn && tickCount % 20 === 0) paintNav();   /* drive the listening blink */
+    if (tickCount % 15 === 4) { const dm = gp('dynMode'); if (dm) { const on = dm !== 'Off'; if (on) dynLast = dm; if (on !== dynOn) { dynOn = on; paintNav(); } } }
     if (tickCount % 15 === 9) { const m = parseFloat(gp('driftMix')); const on = !isNaN(m) && m > 0.1;
         if (on !== driftMixOn) { driftMixOn = on; paintNav(); } }
     if (tickCount % 6 === 0) pollStates();
@@ -1353,7 +1380,7 @@ globalThis.onMidiMessageInternal = function (data) {
     const status = data[0] & 0xf0, d1 = data[1], d2 = data[2];
 
     if (status === 0xb0) {                          /* CC: knobs + buttons */
-        if (d1 === MoveBack && d2 > 0) { if (confirmSave || confirmClear || confirmDelete) { confirmSave = false; confirmClear = false; confirmDelete = false; setMsg('cancelled'); dirty = true; return; } if (menu >= 0) { menu = -1; paintTrackLEDs(); paintNav(); dirty = true; return; } clearAllLEDs(); host_exit_module(); return; }
+        if (d1 === MoveBack && d2 > 0) { if (confirmSave || confirmClear || confirmDelete || confirmWipe || confirmReset) { confirmSave = false; confirmClear = false; confirmDelete = false; confirmWipe = false; confirmReset = false; setMsg('cancelled'); dirty = true; return; } if (menu >= 0) { menu = -1; paintTrackLEDs(); paintNav(); dirty = true; return; } clearAllLEDs(); host_exit_module(); return; }
         if (d1 === MoveShift) { shiftHeld = d2 > 0;
             if (shiftHeld) for (const i of physHeld) {          /* Shift while a punch pad is held: latch it as it is, pressure included */
                 if (punchLatched[i]) continue;
@@ -1363,7 +1390,10 @@ globalThis.onMidiMessageInternal = function (data) {
             }
             return; }
         if (d1 === MoveMute)  { muteHeld = d2 > 0; paintNav(); return; }     /* Mute modifier (lights the button) */
-        if (d1 === MoveCapture && d2 > 0) { openMenu(4); return; }           /* Capture = Tape menu */
+        if (d1 === MoveCapture) {   /* Capture: short press = Dynamic menu (on release); long press = sampler Off <-> last mode */
+            if (d2 > 0) { captureDownAt = now(); captureLong = false; }
+            else { if (!captureLong && captureDownAt) openMenu(4); captureDownAt = 0; }
+            return; }
         if (d1 === MoveMenu && d2 > 0) { openMenu(5); return; }              /* three-lines = Sessions menu */
         if (d1 === MoveSample) { sampleHeld = d2 > 0; paintNav();
             if (d2 === 0) { if (armChord) { if (!armJogged) { spCmd('arm:' + sel); armedArr[sel] = !armedArr[sel];

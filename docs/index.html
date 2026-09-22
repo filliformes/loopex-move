@@ -136,7 +136,8 @@
   <a href="#quickstart">Quickstart</a>
   <a href="#layout">Hardware map</a>
   <a href="#screen">The screen</a>
-  <a href="#tape">Input tape</a>
+  <a href="#tape">Input</a>
+  <a href="#dynamic">Dynamic sampling</a>
   <a href="#loops">Loops &amp; playheads</a>
   <a href="#pages" class="sub">The five loop pages</a>
   <a href="#sends">Sends (Palette)</a>
@@ -204,7 +205,7 @@
     <div><b>Screen</b>: the page on screen: loop params, a menu, or a held punch effect. <b>8 knobs</b> edit the page.</div>
     <div><b>Jog wheel</b>: scrub the selected loop, or move a playhead on the Heads page.</div>
     <div><b class="g">&#8249;</b> Back closes a menu &middot; <b class="g">&#8801;</b> Menu opens Sessions.</div>
-    <div><b>Track buttons</b> (the four colours beside the pads): 1 Input FX &middot; 2 Perform &middot; 3 Send FX &middot; 4 Settings.</div>
+    <div><b>Track buttons</b> (the four colours beside the pads): 1 Input (Tape / EQ) &middot; 2 Perform &middot; 3 Send FX &middot; 4 Settings.</div>
     <div><b class="g">&#9655;</b> Play &middot; <b class="g">&#9675;</b> Record. Right of them: 16 steps select a loop or an FX-seq pattern.</div>
   </div>
   <div class="movewrap"><div class="move" aria-label="Ableton Move layout as used by Loopex">
@@ -219,7 +220,7 @@
       <div class="mv-backmenu"><div class="rb" title="Back">&#8249;</div><div class="rb" title="Menu: Sessions">&#8801;</div></div>
       <div class="mv-playrec"><div class="rb" title="Play">&#9655;</div><div class="rb" title="Record">&#9675;</div></div>
       <div class="mv-steps" id="mvsteps"></div>
-      <div class="rb rbt" style="grid-column:11;grid-row:1" title="Capture: Input Tape">&#9974;</div><div class="rb rbt" style="grid-column:12;grid-row:1" title="Sample/Record: Drift">&#9679;</div>
+      <div class="rb rbt" style="grid-column:11;grid-row:1" title="Capture: Dynamic sampling (hold = on/off)">&#9974;</div><div class="rb rbt" style="grid-column:12;grid-row:1" title="Sample/Record: Drift">&#9679;</div>
       <div class="rb rbt" style="grid-column:11;grid-row:2" title="Loop: loop length">&#10226;</div><div class="rb rbt" style="grid-column:12;grid-row:2" title="Mute">M</div>
       <div class="rb rbt" style="grid-column:11;grid-row:3" title="Delete: FX sequencer">&#10005;</div><div class="rb rbt" style="grid-column:12;grid-row:3" title="Copy: clone">&#10697;</div>
       <div class="rb rbt" style="grid-column:11;grid-row:4" title="Undo">&#8617;</div><div class="rb rbt" style="grid-column:12;grid-row:4" title="Shift">&#8230;</div>
@@ -241,7 +242,7 @@
   </div></div>
   <div class="notes r">
     <div><b>Big knob</b>: master volume.</div>
-    <div><b class="g">&#9974;</b> Capture: Input Tape &middot; <b class="g">&#9679;</b> Sample: Drift.</div>
+    <div><b class="g">&#9974;</b> Capture: Dynamic &middot; <b class="g">&#9679;</b> Sample: Drift.</div>
     <div><b class="g">&#10226;</b> Loop: loop length &middot; <b class="g">M</b> Mute.</div>
     <div><b class="g">&#10005;</b> Delete: FX sequencer &middot; <b class="g">&#10697;</b> Copy: clone.</div>
     <div><b class="g">&#8617;</b> Undo &middot; <b class="g">&#8230;</b> Shift.</div>
@@ -266,8 +267,25 @@
 <section id="tape">
   <div class="eyebrow">Input</div>
   <h2>What goes onto the tape</h2>
-  <p class="lede">Everything you record passes through the input stage first, so set it before you play. The <b>Input FX</b> menu (track button 1) holds the monitor level, the tape style, input gain and a three-band EQ. The <b>Input Tape</b> page (Capture button) is the machine itself: 13 styles including a true <b>Tapeless</b> bypass, drive, wow, flutter, HF rolloff, low cut, hiss and <b>Generations</b>, the sound of repeated dubbing. The thirteen models are <b>Tapeless &middot; Clean &middot; Cass1 &middot; Cass2 &middot; VHS1 &middot; VHS2 &middot; Reel15 &middot; Reel7 &middot; Reel3 &middot; 4trk &middot; Porta &middot; Dub &middot; Warp</b>. Each one&rsquo;s high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ; <b>VHS1</b> is the Hi-Fi track (a depth-modulated FM carrier with its companding noise reduction, bright but pumping) and <b>VHS2</b> the linear edge track, slow and dark. Generations re-applies the selected machine&rsquo;s own loss filter once per pass, so a fourth-generation dub of a Reel3 is darker than one of a Reel15. <b>Tapeless</b> bypasses the machine &mdash; no hiss floor, no head loss or bump &mdash; but every knob on the page still works, and Drive soft-clips on Tapeless and Clean too. Whatever you dial here is printed onto the loop: set the page, then record. By default the source is the line/mic input, but <b>InSrc</b> on Settings page 1 can switch it to the <b>Master</b> mix (the whole Move output, minus Loopex's own signal so it never feeds back) or to any single Schwung or Move track in isolation — see the record-source section below.</p>
+  <p class="lede">Everything you record passes through the input stage first, so set it before you play &mdash; it is baked into the take. Track button 1 opens <b>Input</b>, two pages. <b>Input Tape</b> is the machine: monitor level, one of 13 models (<b>Tapeless &middot; Clean &middot; Cass1 &middot; Cass2 &middot; VHS1 &middot; VHS2 &middot; Reel15 &middot; Reel7 &middot; Reel3 &middot; 4trk &middot; Porta &middot; Dub &middot; Warp</b>), trim, drive, wow, flutter, hiss and <b>Generations</b>, the sound of repeated dubbing. Each model&rsquo;s high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ; VHS1 is the Hi-Fi track (an FM carrier with its companding noise reduction, bright but pumping), VHS2 the linear edge track; Generations re-applies the machine&rsquo;s own loss filter once per pass. Tapeless bypasses the machine but every knob still works, and Drive pushes up to +24&nbsp;dB into the curve on every model. <b>Input EQ</b> (page 2) blends the Studer 962 presence band with the Tascam 424 MkII/MkIII channel EQ: a 20&ndash;800&nbsp;Hz low cut, the 2&ndash;20&nbsp;kHz tape rolloff, &plusmn;15&nbsp;dB shelves with a sweepable low corner (40&ndash;400&nbsp;Hz, default 100 &mdash; the 424&rsquo;s point) and a 3&ndash;15&nbsp;kHz high corner (default 10&nbsp;kHz), and a &plusmn;12&nbsp;dB peak sweepable 150&nbsp;Hz&ndash;7&nbsp;kHz. Every sweep is log. By default the source is the line/mic input; <b>InSrc</b> on Settings page 1 can switch it to the <b>Master</b> mix, any single Schwung or Move track, or Loopex&rsquo;s own output &mdash; see the record-source section below.</p>
 </section>
+
+<section id="dynamic">
+  <div class="eyebrow">Dynamic</div>
+  <h2>The input plays the sampler</h2>
+  <p class="lede">On the <b>Capture</b> button. Set <b>Dyn</b> to a mode &mdash; or <b>hold Capture</b> to toggle it; the button blinks while it listens &mdash; and every phrase you play is captured into a pad by itself. A capture is an ordinary recording: it gets the tape stage, the loop pages, the sends, and its pad goes red then green like any take. What was on the pad is <em>replaced</em>, never stacked (Chase Bliss Onward); <b>Spread</b> is how many pads the sampler rotates through from the selected one &mdash; 1 replaces the same pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Continua&rsquo;s <em>dimension</em>, with sixteen layers). Muted pads are skipped, and a pad that already holds a loop is never overwritten until you say so: when the range is full the menu opens and asks <code>ALL PADS FULL: OVERWRITE?</code>.</p>
+  <div class="scroll"><table class="thin">
+    <tr><th>Knob</th><th>What it does</th></tr>
+    <tr><td>Dyn</td><td>Off &middot; <b>Level</b> (a sound above the threshold) &middot; <b>Onset</b> (a transient, however loud the sustain under it) &middot; <b>Phrase</b> (starts on sound, stops at the next gap) &middot; <b>Clock</b> (every Size, on Move&rsquo;s tempo)</td></tr>
+    <tr><td>Sense</td><td>the mode&rsquo;s threshold, &minus;60 &rarr; &minus;6 dBFS</td></tr>
+    <tr><td>Size</td><td>1/16 &hellip; 8 bars at Move&rsquo;s tempo, or <b>Free</b>: record until 200&nbsp;ms of quiet (default)</td></tr>
+    <tr><td>Spread</td><td>1&ndash;16 pads from the selected one (default 16)</td></tr>
+    <tr><td>Error</td><td>how much of each new capture is randomised &mdash; 0 faithful, 1 a new creature every time</td></tr>
+    <tr><td>Sustain</td><td>how long a capture plays before it pauses itself and its Decay fades it: 1 &rarr; 60&nbsp;s, top = forever</td></tr>
+    <tr><td>Rnd Pad &middot; Rnd All</td><td>randomise every loop-page parameter of the selected pad / of all sixteen, no confirmation, by musical rules: Speed and Pitch move only as complementary intervals (the heard transposition and the tempo ratio are both octaves, fifths or major/minor thirds, within two octaves); playhead speeds are never touched; heads 2&ndash;4 switch on or off and only an active one gets a random pan; Volume is left alone; sends, Comp and Sat stay under 60&nbsp;%</td></tr>
+  </table></div>
+  <p class="muted">A 100&nbsp;ms pre-roll means a capture keeps the transient that triggered it. Pitch- and novelty-triggered modes are on the way.</p>
+</section></section>
 
 <section id="loops">
   <div class="eyebrow">Loops &amp; playheads</div>
@@ -414,7 +432,7 @@
 <section id="sessions">
   <div class="eyebrow">Sessions</div>
   <h2>Save the whole rig</h2>
-  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot; <b>Clear</b> (K5) wipes all sixteen loops and leaves your settings alone; <b>Reset</b> (K6) returns the selected loop &mdash; audio and every setting &mdash; to factory. Saving over a used slot, deleting one, clearing or resetting asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback; a second background thread runs the per-loop pitch shifters. Sessions live under <code>/data/UserData/UserLibrary/Loopex/</code> and survive reinstalls. The audio is stored as plain 16-bit stereo WAV files, one per loop (<code>sessionNN/sNN_loop01.wav</code> &hellip;), so you can copy them off the Move and use them anywhere.</p>
+  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot; <b>Clear</b> (K5) wipes all sixteen loops and resets their settings, leaving the global pages alone; <b>Reset</b> (K6) returns every setting of the selected loop to factory, leaving its audio playing. Saving over a used slot, deleting one, clearing or resetting asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback; a second background thread runs the per-loop pitch shifters. Sessions live under <code>/data/UserData/UserLibrary/Loopex/</code> and survive reinstalls. The audio is stored as plain 16-bit stereo WAV files, one per loop (<code>sessionNN/sNN_loop01.wav</code> &hellip;), so you can copy them off the Move and use them anywhere.</p>
 </section>
 
 <section id="cheat">
@@ -424,7 +442,7 @@
     <tr><th>Gesture</th><th>Action</th></tr>
     <tr><th colspan="2">Left 16 pads: the loops</th></tr>
     <tr><td>Tap</td><td>record → play ⇄ pause</td></tr>
-    <tr><td>Undo + pad</td><td>overdub (tap again to stop)</td></tr>
+    <tr><td>Undo + pad</td><td>overdub (tap again to stop) — or hold the loop&rsquo;s step button</td></tr>
     <tr><td>Hold (~1 s)</td><td>clear the loop (Undo restores)</td></tr>
     <tr><td>Shift + left pad</td><td>cycle playback speed ½× · 1× · 2×</td></tr>
     <tr><td>Mute + left pad</td><td>quick mute (stays in phase)</td></tr>
@@ -438,11 +456,11 @@
     <tr><td>Undo + right pad</td><td>reset that effect and its LFO to defaults (LED flashes)</td></tr>
     <tr><td>✕ + right pad(s) + step</td><td>write into the FX sequencer (see the section above)</td></tr>
     <tr><th colspan="2">Everything else</th></tr>
-    <tr><td>Step</td><td>select loop → waveform · same step = next page</td></tr>
+    <tr><td>Step</td><td>select loop → waveform · same step = next page · hold ~0.6 s = overdub that loop</td></tr>
     <tr><td>Up / Down</td><td>loop page, or menu page</td></tr>
     <tr><td>Jog</td><td>scrub loop · P4: move touched head</td></tr>
     <tr><td>Tracks 1–4</td><td>Input · Perform · Send FX · Settings</td></tr>
-    <tr><td>Capture</td><td>Input Tape menu</td></tr>
+    <tr><td>Capture</td><td>Dynamic sampling menu &middot; hold ~0.6 s: sampler on / off (blinks while listening)</td></tr>
     <tr><td>Record (●, next to Capture)</td><td>Drift menu</td></tr>
     <tr><td>Menu (≡)</td><td>Sessions menu</td></tr>
     <tr><td>✕ (Delete)</td><td>tap: run / stop the FX sequencer · hold: pattern view + FX Seq page</td></tr>
@@ -468,7 +486,7 @@
  * pad 16 / PalFX top-right, like the device. Steps live on row 5 beside Play/Record. */
 (function(){
   const B=document.getElementById('mvbody'), ST=document.getElementById('mvsteps');
-  const bars=['#4aa3ff','#b98bff','#ff7a5b','#4bd47a'], barNames=['Track 1: Input FX','Track 2: Perform','Track 3: Send FX','Track 4: Settings'];
+  const bars=['#4aa3ff','#b98bff','#ff7a5b','#4bd47a'], barNames=['Track 1: Input','Track 2: Perform','Track 3: Send FX','Track 4: Settings'];
   const fam=['var(--blue)','var(--blue)','var(--blue)','var(--blue)',
              'var(--pink)','var(--pink)','var(--pink)','var(--pink)',
              'var(--purple)','var(--purple)','var(--purple)','var(--purple)',

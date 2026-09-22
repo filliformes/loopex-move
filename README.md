@@ -110,18 +110,50 @@ Hold **Left** and the whole master brakes to a stop in about three seconds; hold
 and it winds up to a tone. Release and it eases back to 1×. The glide is linear in
 semitones and the last octaves of a stop fade to silence.
 
-### The Tape machine (record path)
-A full input tape stage on the **Capture** button: **Tape model** (13: `Tapeless · Clean · Cass1 ·
-Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk · Porta · Dub · Warp`) · Drive · Wow · Flutter ·
-HF rolloff · Low cut · Hiss · **Generations**. Default is `Clean`. Each model's high-frequency loss
-is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel
-speeds genuinely differ. **VHS1** is the Hi-Fi track — a depth-modulated FM carrier with its
-companding noise reduction, bright but pumping — and **VHS2** the linear edge track, slow and
-dark. **Generations** re-applies the selected machine's own loss filter once per pass, so a
-fourth-generation dub of a Reel3 is darker than one of a Reel15.
-**Tapeless** bypasses the *machine* — no hiss floor, no head loss or bump — but every knob on the page
-still works, and Drive soft-clips on Tapeless and Clean too (it used to be a no-op on the default
-model). The page shapes what gets **recorded**: set it, then record.
+### The Input (track button 1, two pages)
+Everything you record passes through here first, so set it before you play — it is baked into the
+take. **Input Tape** is the machine: Mon (monitor level) · Tape · Trim · Drive · Wow · Flut · Hiss ·
+Gen. The 13 models are `Tapeless · Clean · Cass1 · Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk ·
+Porta · Dub · Warp`, default `Clean`. Each model's high-frequency loss is derived from its head gap
+and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ; **VHS1** is
+the Hi-Fi track (an FM carrier with its companding noise reduction, bright but pumping) and **VHS2**
+the linear edge track, slow and dark; **Gen** re-applies the machine's own loss filter once per pass.
+**Tapeless** bypasses the machine — no hiss floor, no head loss or bump — but every knob still works,
+and Drive pushes up to +24 dB into the curve on every model.
+
+**Input EQ** (page 2): LoCut · HF · LowF · Low · Mid · MidF · High · HiF. A blend of the Studer 962
+presence band and the Tascam 424 MkII/MkIII channel EQ (owner's manual p.11/36/45): ±15 dB 2nd-order
+shelves with a sweepable low corner (**LowF** 40–400 Hz, default 100 Hz — the 424's point) and a high
+corner 3–15 kHz (default 10 kHz), a ±12 dB peak sweepable 150 Hz–7 kHz, a 20–800 Hz low cut and a
+2–20 kHz tape rolloff (HF: turn *down* to roll off). Every sweep is log, so each octave gets the same
+knob travel.
+
+### Dynamic sampling (Capture button)
+The input plays the sampler. Turn **Dyn** (K1) to a mode — or **long-press Capture** to toggle it;
+the button blinks while it listens — and every phrase you play is captured into a pad by itself: an
+ordinary recording, so it gets the tape stage, the loop pages, the sends, and its LED goes red then
+green like any take. What was on the pad is *replaced*, never stacked (Chase Bliss Onward);
+**Spread** is how many pads the sampler rotates through from the selected one — 1 replaces the same
+pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Continua's
+*dimension*, with sixteen layers). Muted pads are skipped, and a pad that already holds a loop is
+**never overwritten until you say so**: when the range is full the menu opens and asks
+`ALL PADS FULL: OVERWRITE?` — K8 lets it carry on, K5 or Back turns Dynamic off.
+
+| Knob | |
+|---|---|
+| **Dyn** | Off · **Level** (a sound above the threshold) · **Onset** (a transient, however loud the sustain under it) · **Phrase** (starts on sound, stops at the next gap) · **Clock** (every Size, on Move's tempo) |
+| **Sense** | the mode's threshold, −60 → −6 dBFS |
+| **Size** | 1/16 … 8 bars at Move's tempo, or **Free** — record until 200 ms of quiet (default) |
+| **Spread** | 1–16 pads from the selected one (default 16) |
+| **Error** | how much of each new capture is randomised — 0 faithful, 1 a new creature every time |
+| **Sustn** | how long a capture plays before it pauses itself (its own Decay fades it): 1 → 60 s, top = forever |
+| **RndPad · RndAll** | randomise every loop-page parameter of the selected pad / of all sixteen, no confirmation |
+
+A 100 ms pre-roll means a capture keeps the transient that triggered it. **Randomise** is musical by rule: Speed and Pitch move only as *complementary musical intervals* (the heard
+transposition and the tempo ratio are both octaves, fifths or major/minor thirds — never more than two
+octaves — and a third of the time nothing moves),
+playhead speeds are never touched, heads 2–4 are switched on or off and only an active one gets a
+random pan, the loop's Volume is left alone, and sends, Comp and Sat never go past 60 %.
 
 ### Drift — a global evolving memory (Sample button)
 A drifting-delay memory station inspired by **Soma COSMOS**, on the **Sample** button. Four
@@ -146,9 +178,9 @@ recorded audio are stored — the audio as plain **16-bit stereo WAV** files (`s
 loop) that you can copy straight off the Move — the folder shows up in the Schwung Manager's file
 browser (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`); sessions from before 0.9.2
 are moved there and still load.
-**Clear** (K5 on the Sessions page) wipes all sixteen loops after a confirmation and leaves your
-settings alone; **Reset** (K6) returns the selected loop — its audio and every one of its settings —
-to factory defaults, also after a confirmation; all disk work runs on a `SCHED_OTHER` worker thread (`lpx-sio`) pinned
+**Clear** (K5 on the Sessions page) wipes all sixteen loops *and* resets every loop's settings after
+a confirmation (the global pages — Output, Input, Drift… — are untouched); **Reset** (K6) returns every *setting* of the selected loop to factory defaults — the audio
+and its playback are untouched — also after a confirmation; all disk work runs on a `SCHED_OTHER` worker thread (`lpx-sio`) pinned
 to cores 0–2, never on the audio callback. A second worker, `lpx-ps`, runs the per-loop pitch
 shifters the same way. Sessions live in
 `/data/UserData/UserLibrary/Loopex/` so reinstalls keep them.
@@ -230,15 +262,15 @@ channel-1 pads.
 | Gesture | Action |
 |---------|--------|
 | **Tap** left pad | cycle Empty → Rec → Play ⇄ Pause (un-pause restarts from Start) |
-| **Undo + pad** (playing/paused) | Overdub (tap again to stop) |
+| **Undo + pad** (playing/paused) | Overdub (tap again to stop) — or **hold the loop's step button** |
 | **Hold** left pad (~1 s) | Clear the loop *(Undo restores it)* |
 | **Shift + tap** | cycle playback speed (½× / 1× / 2×) |
 | **Mute + tap** | quick-mute (playhead keeps running — returns in phase) |
 | **Copy + pad, then pad** | clone a loop (source blinks, second pad receives it) |
 | **Loop + pad** | cycle loop length 1× → ½× → ¼× → ⅛× |
 | **Right pad** | punch-FX (momentary) · **Shift + pad** = latch · **Undo + pad** = reset params · **✕ + pad + step** = sequence |
-| **Step** | select track (shows its waveform) · same step again = next loop page |
-| **Track buttons 1–4** | menus: Input FX · Perform · Send FX · Settings |
+| **Step** | select track (shows its waveform) · same step again = next loop page · **hold ~0.6 s = overdub that loop** (one hand) |
+| **Track buttons 1–4** | menus: Input (Tape / EQ) · Perform · Send FX · Settings |
 
 ### Buttons and knobs
 | Control | Action |
@@ -247,7 +279,7 @@ channel-1 pads.
 | **Touch a knob** | full 8-knob page on screen (~5 s) |
 | **Up / Down** | previous / next loop page (P1–P5) |
 | **Jog wheel** | scrub the selected loop (audible, tape-style) · in P4 moves the touched head |
-| **Capture** | Input Tape menu |
+| **Capture** | Dynamic sampling menu · **hold** = sampler on/off (blinks while listening) |
 | **✕ (Delete)** | tap = run/stop the FX sequencer · hold = pattern view + FX Seq page |
 | **Left / Right** | tape stop / tape wind (held) |
 | **Sample/Record** | Drift menu · **Shift + Sample** = threshold-arm (pad blinks red) · **+ jog** sets the threshold |

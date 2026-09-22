@@ -78,8 +78,9 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   `SCHED_OTHER` worker (`lpx-sio`) pinned to cores 0-2**, joined in `destroy_instance`. Audio is
   `sessionNN/sNN_loopNN.wav` (both 1-based, as the pads and slots are numbered) (16-bit stereo WAV, interleaved on the worker in 4096-frame chunks; `wav_write`
   / `wav_read`); pre-0.9.2 `tNN.raw` (L block then R block) is read as a fallback and removed once
-  a `.wav` has been written over it. Sessions page K5 = **Clear** (`clearAll`) and K6 = **Reset** (`resetSel`:
-  `voice_clear` + `voice_defaults`, the same function `create_instance` uses), both with the Del-style
+  a `.wav` has been written over it. Sessions page K5 = **Clear** (`clearAll`: `voice_clear` + `voice_defaults` on all 16) and K6 = **Reset** (`resetSel`:
+  `voice_defaults` with state/loopLen/playPhase/muted preserved - settings only, audio stays; the same
+  function `create_instance` uses), both with the Del-style
   confirm popup (K5 = NO / K8 = YES). The
   waveform display scan (`wave_compute`) and the Disintegration pass also run there.
 - **Pitch shifters** — Signalsmith Stretch **2048/512** (1024/256 was rejected by ear) on a second
@@ -103,6 +104,20 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   A stem that is not there (host < 1.4 or `link_audio_publish` off) falls back to Line; `inSrcLive`
   (get_param) is 0 then and the UI says so while Settings p1 is open. `inChan` (Stereo/Left/Right/Sum)
   is applied right after the source read.
+- **Dynamic sampler** (0.9.2, `dyn_*` in loopex.c): per sample on the finished input, before the
+  record loop. A capture = `voice_clear` (undoable) + `VS_RECORDING` + 100 ms pre-roll from a ring,
+  closed to `VS_PLAYING` at Size (tempo via `punch_beat()`) or after 200 ms of quiet (Free/Phrase);
+  then `voice_randomize(v, dynError)` and a Sustain timer (`dynDie`, paused when it expires). Target
+  = selected pad + rotating cursor within Spread, skipping muted/armed/recording pads; a pad with
+  audio is skipped unless `dynOverwrite` - with none free the sampler parks (`dynWait`) and raises
+  `dynFull`, which the UI turns into the ALL PADS FULL popup (K8 = overwrite on, K5/Back = mode
+  Off). Changing the mode resets the permission. Modes 4 Pitch / 5 Novelty exist in the enum but
+  are hidden in ui.js until their worker-side analyser exists. Capture long-press (600 ms) toggles
+  Off <-> last mode; the white-only LED blinks while listening.
+- **Randomiser** (`voice_randomize`, also Rnd Pad / Rnd All): Speed and Pitch as complementary
+  musical intervals (T = heard, S = tempo, both from {0,±3,±4,±7,±12,±15,±16,±19,±24}, P = T-S within
+  ±24, every valid pair enumerated and picked uniformly), unison 30% of the time; head speeds untouched; heads 2-4 on/off with pan only when
+  active; Volume untouched; send/sendB/comp/sat <= 0.6; Start/End window >= 5%.
 - **Input Tape knobs act on every model** (0.9.1). They were gated on `preModel>0`, which made the
   page dead on Tapeless and Drive a x4-then-/4 no-op on Clean. Tapeless/Clean soft-clip under Drive.
 
@@ -113,8 +128,8 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   right 16 = punch FX. *(Older notes in this file claimed 36–51 — that was wrong.)*
 - **5 loop pages** (Up/Down): `Loop · Texture · Tone · Heads · HeadMix`.
   HeadMix = per-head Vol/Pan; **H1V/H1P are the same params as page 1's Vol/Pan** by design.
-- **8 menus** — track buttons 1-4 → Input FX / Perform / Send FX / Settings; Capture → Input
-  Tape; ≡ → Sessions; ● → Drift; ✕ → FX Seq. **Perform and Settings are two-page.**
+- **8 menus** — track buttons 1-4 → Input (p1 Tape / p2 EQ) / Perform / Send FX / Settings; Capture →
+  **Dynamic** (0.9.2; Input Tape merged into Track 1); ≡ → Sessions; ● → Drift; ✕ → FX Seq. **Perform and Settings are two-page.**
 - **Settings p1** ArmTh · ODub · LpFlt · Root · **InCh** (0.9.1; was a duplicate InMon) · InSrc · MIDI · MidiO —
   **p2 is named "Output"** (`MENU_PAGE_NAMES`): Out · LoCut · HiCut · PWide · Char · gSat · Glue · Limit,
   in signal order after the punch bank. **Perform p2:** Cut · Reso · FChar · Clock · ClkMd · ClkAt ·
@@ -126,8 +141,8 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
 ### ⚠ `ui.js` traps
 - **`MENU_DEFS[1]` and `[2]` are swapped at runtime** right after the literal
   (`{ const t = MENU_DEFS[1]; MENU_DEFS[1] = MENU_DEFS[2]; MENU_DEFS[2] = t; }`). Literal order
-  is Input FX / Sends / Perform / Settings; **runtime** order (which `MENU_NAMES` and
-  `MENU_PAGED = {1:true, 3:true}` assume) is Input FX / **Perform** / **Sends** / Settings.
+  is Input / Sends / Perform / Settings; **runtime** order (which `MENU_NAMES` and
+  `MENU_PAGED = {0:true, 1:true, 3:true}` assume) is Input / **Perform** / **Sends** / Settings.
 - **Punch defaults live in `ui.js` `punchVals`**, not the DSP — the UI pushes them on every pad
   press, so the DSP's `punchParams` init is only a fallback. `PUNCH_DEFAULTS` (Undo+pad) is a
   snapshot of `punchVals`. Stretch/Freeze default **Grain = 0**.
@@ -144,7 +159,8 @@ JS drives the DSP entirely through `set_param(key,val)` / `get_param(key)`.
 - **Globals:** master/output (`masterVol masterLoCut masterHiCut masterEQ masterGlue tapeLimit
   globalSat masterComp`), behaviour (`overdubMode armThresh rootNote stability globalWowFlut
   loopFiltMode selTrack`), I/O (`inSource inputMonitor inputGain inLow inMid inMidFreq inHigh
-  inHighFreq inChan`), tape (`tape*`), perform (`st* mf* mClock* perfTrem* dropAmt`), drift (`drift*`),
+  inHighFreq inLowFreq inChan`), tape (`tape*`), dynamic (`dynMode dynSense dynSize dynSpread dynError
+  dynSustain dynOverwrite dynResume`; read-only `dynCount dynFull`; commands `rndSel rndAll`), perform (`st* mf* mClock* perfTrem* dropAmt`), drift (`drift*`),
   punch (`punchWidth pfx pflfo punch punchPress`), sequencer (`fxseq*`), MIDI (`midiIn midiOut`).
 - **Commands:** `cmd` (`tap/odub/clear/unclr/undo/mute/sel/arm/clone`), `session`, `scrub`,
   `headpos`, `jump`, `scan`, `tapeHold`, `clearSel`, `clearAll`.

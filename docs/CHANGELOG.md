@@ -1,18 +1,52 @@
 # Changelog
 
-## v0.9.2 — 2026-09-21
+## v0.9.2 — unreleased
 
+### Dynamic sampling (Capture button)
+- **The input plays the sampler.** Four modes — **Level**, **Onset**, **Phrase**, **Clock** — capture
+  every phrase you play into a pad by itself, as an ordinary recording (tape stage, loop pages, sends,
+  LEDs). What was on the pad is replaced, never stacked (Onward); **Spread** rotates through 1–16
+  pads (Continua's *dimension*, sixteen layers wide); muted pads are skipped; a pad with audio is never
+  overwritten until you answer `ALL PADS FULL: OVERWRITE?`. **Sense**, **Size** (tempo divisions or
+  Free), **Error** (each capture randomised by that much), **Sustain** (a capture pauses itself after
+  1–60 s, or never). 100 ms pre-roll keeps the triggering transient. Long-press Capture toggles it;
+  the LED blinks while listening. Pitch- and novelty-triggered modes to follow.
+- **Rnd Pad / Rnd All** randomise the loop pages by musical rules: Speed and Pitch only as complementary
+  musical intervals, playhead speeds untouched, heads 2–4 on/off with pan only when active, Volume
+  untouched, sends / Comp / Sat capped at 60 %.
+
+### Input
+- **Input FX and Input Tape merged** under track button 1 as *Input Tape* / *Input EQ*; Capture freed.
+- **Input EQ blended** from the Studer 962 presence band and the Tascam 424 MkII/MkIII channel EQ
+  (owner's manual): ±15 dB shelves with a sweepable low corner (**LowF** 40–400 Hz, default 100) and a
+  3–15 kHz high corner (default 10 kHz), ±12 dB mid 150 Hz–7 kHz; every sweep log, LoCut 20–800 Hz log.
+
+### Gestures
+- **Hold a loop's step button (~0.6 s) to overdub it** — one-handed, no menu, no mode. Hold again
+  to stop. Undo + pad still works. A short tap selects as before; on the selected loop the tap
+  flips to the next page on release. (Thanks Hannes.)
+- **Speed and length readouts stay on screen ~2.5 s** (`T3 speed 1/2x`, `T3 length 1/4x`) instead of
+  vanishing under the footer hint. (Thanks djd_oz.)
+
+Changed in 0.9.0, never announced:
+- **Overdub is Undo + pad**, not a double-tap. The double-tap forced every pad press to wait and see
+  whether a second one was coming, so a pad did not stop the moment you hit it — and overdubs
+  started by accident. Undo + pad is instant and never misfires.
+- **Tapping a recorded pad**: first tap plays, second tap **stops** it, third tap starts it again
+  **from the Start point**, re-phasing all four playheads.
+
+### Sessions
 - **Sessions live in the Move's UserLibrary and save loops as WAV.** Sessions moved from
   `/data/UserData/schwung/loopex-sessions` to `/data/UserData/UserLibrary/Loopex` — where the
   Schwung Manager's file browser shows them, next to Magnéto's recordings — and each loop is a plain
   `sessionNN/sNN_loop01.wav` … `sNN_loop16.wav` (16-bit stereo 44.1 kHz; two-digit numbers so
   the Manager's file browser sorts them). Existing sessions are moved on first launch (an atomic
   rename, nothing copied) and every old `tNN.raw` is converted to WAV, then removed. (Thanks Hannes.)
-- **Clear** on the Sessions page (K5): wipes all sixteen loops after a confirmation, settings
-  untouched, header back to *New*. K5 is also *NO* inside the popup, so a second turn cancels
+- **Clear** on the Sessions page (K5): wipes all sixteen loops and resets their settings after a
+  confirmation (global pages untouched), header back to *New*. K5 is also *NO* inside the popup, so a second turn cancels
   rather than wipes. (Thanks Hannes.)
-- **Reset** on the Sessions page (K6): the selected loop back to factory — audio (still undoable)
-  and every setting — after a confirmation. The defaults are the very same function
+- **Reset** on the Sessions page (K6): every setting of the selected loop back to factory — the audio
+  stays and keeps playing — after a confirmation. **Clear** resets the loops' settings too. The defaults are the very same function
   `create_instance` uses, so "reset" means exactly "as new". (Thanks Hannes.)
 
 ## v0.9.1 — 2026-09-20

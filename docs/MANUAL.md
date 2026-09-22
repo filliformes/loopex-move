@@ -13,7 +13,7 @@ This is the full reference. The [README](../README.md) is the short tour.
  │ header · knob page / waveform / overview · footer hints     │
  └─────────────────────────────────────────────────────────────┘
  [Step 1 … Step 16]                       ← select a loop / FX-sequencer pattern
- [Track 1] [Track 2] [Track 3] [Track 4]  ← menus: Input FX · Perform · Send FX · Settings
+ [Track 1] [Track 2] [Track 3] [Track 4]  ← menus: Input · Perform · Send FX · Settings
  ┌ left 4×4 pads ┐  ┌ right 4×4 pads ┐
  │  16 loops     │  │  16 punch FX   │
  └───────────────┘  └────────────────┘
@@ -38,6 +38,7 @@ The screen has three views: the **overview** (track strip, CPU, input level, foo
 | Tap while recording | close the loop and play |
 | Tap while playing | pause · tap again to restart from Start (click-free) |
 | **Undo + pad** while playing or paused | overdub · tap again to stop overdubbing |
+| **Hold the loop's step button** (~0.6 s) | overdub, one-handed · hold again to stop |
 | Hold a pad (~1 s) | clear the loop (Undo restores it) |
 | Shift + tap | cycle playback speed ½× · 1× · 2× |
 | Mute + tap | quick mute; the playhead keeps running so the loop returns in phase |
@@ -59,7 +60,7 @@ Loops are free-running: they do not need to share a length or a downbeat.
 
 ### 2.4 Selecting and pages
 
-Press a **step** to select that loop: the screen shows its waveform with the active playheads riding over it. Press the same step again to cycle through its five knob pages. **Up** and **Down** move between pages from anywhere, including the waveform view.
+Press a **step** to select that loop: the screen shows its waveform with the active playheads riding over it. Press the same step again to cycle through its five knob pages. **Hold** a step for about half a second and that loop goes into **overdub** — the one-handed alternative to Undo + pad; hold again to stop. **Up** and **Down** move between pages from anywhere, including the waveform view.
 
 | Page | K1 | K2 | K3 | K4 | K5 | K6 | K7 | K8 |
 |---|---|---|---|---|---|---|---|---|
@@ -130,20 +131,22 @@ Knobs 5–8 only follow a pad while it is physically held; latched pads keep run
 
 | Button | Menu | K1 | K2 | K3 | K4 | K5 | K6 | K7 | K8 |
 |---|---|---|---|---|---|---|---|---|---|
-| Track 1 | **Input FX** | Monitor | Tape Style | Input Gain | Low | Mid | Mid Freq | High | High Freq |
+| Track 1 | **Input Tape** | Monitor | Tape | Trim | Drive | Wow | Flutter | Hiss | Generations |
+| Track 1 (page 2) | **Input EQ** | LoCut | HF | **LowF** | Low | Mid | MidF | High | HiF |
 | Track 2 | **Perform** | Stumble Mix | Stumble Step | Stumble Odds | Stumble Size | Stumble Reach | Stumble Kind | Jump | Scan |
 | Track 2 (page 2) | **Perform 2** | Filter Cut | Reso | FChar (filter model) | Clock | ClkMd (Music / Free) | ClkAt (pre / post punch) | Pump | Pump Rate |
 | Track 3 | **Send FX** | A FX | A Amount | A Macro | A Drift | B FX | B Amount | B Macro | B Drift |
 | Track 4 | **Settings** | Arm Threshold | ODub mode | **LpFlt** (loop filter) | Root | **InCh** (input channels) | **InSrc** (input source) | MIDI In | MIDI Out |
 | Track 4 (page 2) | **Output** | Out | LoCut (20–1000 Hz) | HiCut | PWide (punch width) | Char | gSat (to 2.0) | Glue | Limit |
-| Capture | **Input Tape** | Tape Style | Drive | Wow | Flutter | HF | Lo Cut | Hiss | Generations |
+| Capture | **Dynamic** | Dyn (mode) | Sense | Size | Spread | Error | Sustain | Rnd Pad | Rnd All |
 | Sample | **Drift** | Drift | Rate | Size | FBk | Supr | Blur | Damp | Mix |
 | ≡ (Menu) | **Sessions** | Slot | Save | Load | Del | **Clear** | **Reset** | | |
 | ✕ (held) | **FX Seq** | Run | Speed | Length | Chance | Gate | Swing | Direction | Clear |
 
 Press the same button again, or **Back**, to close a menu. Enums step once per four detents so a fast turn does not race through the list.
 
-- **Input Tape** — 13 tape models (`Tapeless · Clean · Cass1 · Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk · Porta · Dub · Warp`, default Clean), drive, wow, flutter, HF rolloff, low cut, hiss and **Generations**. It shapes what gets recorded. Each model's high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ. **VHS1** is the Hi-Fi track — a depth-modulated FM carrier with its companding noise reduction, bright but pumping — and **VHS2** the linear edge track, slow and dark. **Generations** re-applies the selected machine's own loss filter once per pass, so a fourth-generation dub of a Reel3 is darker than one of a Reel15. **Tapeless** bypasses the *machine* — no hiss floor, no head loss or bump — but every knob on the page still works, and Drive soft-clips on Tapeless and Clean too (it used to be a no-op on the default model). The page shapes what gets **recorded**: set it, then record.
+- **Input** (track button 1, two pages) — **Input Tape** is the machine: Monitor level, one of 13 models (`Tapeless · Clean · Cass1 · Cass2 · VHS1 · VHS2 · Reel15 · Reel7 · Reel3 · 4trk · Porta · Dub · Warp`, default Clean), Trim, Drive, Wow, Flutter, Hiss and Generations. Each model's high-frequency loss is derived from its head gap and tape speed, with a speed-scaled head bump; VHS1 is the Hi-Fi track (FM carrier + companding NR), VHS2 the linear edge track; Generations re-applies the machine's own loss filter once per pass. Tapeless bypasses the machine (no hiss floor, no head loss or bump) but every knob still works; Drive pushes up to +24 dB into the curve on every model. **Input EQ** (page 2) blends the Studer 962 presence band with the Tascam 424 MkII/MkIII channel EQ (owner's manual p.11/36/45): a 20–800 Hz low cut, the 2–20 kHz tape rolloff (HF: turn *down*), ±15 dB 2nd-order shelves with a sweepable low corner (LowF 40–400 Hz, default 100 Hz, the 424's point) and a 3–15 kHz high corner (default 10 kHz), and a ±12 dB peak sweepable 150 Hz–7 kHz. Every sweep is log. It shapes what gets recorded.
+- **Dynamic** (Capture button) — the input plays the sampler. Set **Dyn** to a mode, or **hold Capture** to toggle it (the button blinks while listening), and every phrase you play is captured into a pad by itself: an ordinary recording that gets the tape stage, the loop pages, the sends, and whose LED goes red then green like any take. What was on the pad is *replaced*, never stacked; **Spread** is how many pads the sampler rotates through from the selected one (1 = the same pad every time; 16 = a rolling memory of the last sixteen phrases). Muted pads are skipped, and a pad that already holds a loop is never overwritten until you say so — when the range is full the menu opens with `ALL PADS FULL: OVERWRITE?` (K8 yes, K5 or Back turns Dynamic off; it asks again next time you turn it on). Modes: **Level** (a sound above the threshold), **Onset** (a transient, however loud the sustain under it), **Phrase** (starts on sound, stops at the next gap), **Clock** (every Size on Move's tempo, no pre-roll). **Sense** is the mode's threshold (−60 → −6 dBFS); **Size** is 1/16 … 8 bars at Move's tempo or **Free** (until 200 ms of quiet — the default); **Error** is how much of each new capture is randomised; **Sustain** is how long a capture plays before it pauses itself and its Decay fades it (1 → 60 s, top = forever). A 100 ms pre-roll keeps the transient that triggered a capture. **Rnd Pad / Rnd All** randomise the loop pages of the selected pad / all sixteen, without confirmation, by musical rules: Speed and Pitch move only as complementary musical intervals (the heard transposition and the tempo ratio are both octaves, fifths or major/minor thirds, never more than two octaves; a third of the time nothing moves); playhead speeds are never touched; heads 2–4 are switched on or off and only an active one gets a random pan; the loop's Volume is left alone; sends, Comp and Sat never go past 60 %.
 - **Send FX** — two Palette buses (29 effects: Drive, Sweeten, Fuzz, Howl, Fold, Swell, Doubler, Vibrato, Phaser, Tremolo, Pitch, Shift, Cascade, Reels, Collage, Reverse, Space, Bloom, Filter, Squash, Cassette, Broken, Interference, Halo, Plate, Quartz, Prism, Veil), each with Amount, Macro and Drift. Every effect is loudness-matched to the dry signal it replaces, and switching effects **morphs** — the outgoing effect fades out as the incoming one fades in — so sweeping through the list never clicks. (The swap itself happens on the worker.)
 
   The last four are full reverbs, all 100% wet (they sit on a send):
@@ -228,7 +231,7 @@ Hold **Left** and the whole master brakes to a stop in about three seconds; hold
 
 ## 7. Sessions (≡ Menu button)
 
-Sixty-four slots. **Slot** browses (one slot per four detents), **Save** writes, **Load** reads, **Del** (K4) erases the slot, **Clear** (K5) wipes all sixteen loops — after a confirmation — and leaves every setting as it is (it is the loops, not the rig). **Reset** (K6) takes the *selected* loop back to factory: its audio (Undo can still bring it back) and every one of its settings — speed, filter, EQ, sends, playheads, HeadMix, all of it — after a confirmation. Saving over a used slot, or deleting one, asks first (K8 = yes, K5 = no, Back cancels). Each slot is named by date and time (`Sep 14 21:30` in the footer); the header shows which session is loaded, or **New**. A successful save shows a burst.
+Sixty-four slots. **Slot** browses (one slot per four detents), **Save** writes, **Load** reads, **Del** (K4) erases the slot, **Clear** (K5) wipes all sixteen loops and resets every loop's settings to factory — after a confirmation. The global pages (Input, Output, Perform, Drift, Sends) are left as they are: it is the loops, not the rig. **Reset** (K6) takes every *setting* of the selected loop back to factory — speed, filter, EQ, sends, playheads, HeadMix, all of it — after a confirmation. The audio stays and keeps playing from where it was; hold the pad if you want that cleared too. Saving over a used slot, or deleting one, asks first (K8 = yes, K5 = no, Back cancels). Each slot is named by date and time (`Sep 14 21:30` in the footer); the header shows which session is loaded, or **New**. A successful save shows a burst.
 
 A session holds every setting, the punch pad values, the FX-sequencer pattern and all recorded audio. The audio is stored as plain **16-bit stereo 44.1 kHz WAV** files — `sessionNN/sNN_loop01.wav` … `sNN_loop16.wav`, one per loop — so you can copy them off the Move (`scp ableton@move.local:/data/UserData/UserLibrary/Loopex/session03/*.wav .`) and use them anywhere — or browse them in the Schwung Manager (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`). Sessions saved before 0.9.2 are moved there on first launch and still load. Disk work runs on a worker thread pinned to cores 0–2, never on the audio callback. Files live in `/data/UserData/UserLibrary/Loopex/` and survive reinstalls.
 
@@ -282,9 +285,10 @@ A Novation LaunchControl XL can play all sixteen loops from hardware. **MIDI In*
 | Mute + pad · Copy + pad, pad · Loop + pad | quick mute · clone · loop length |
 | Shift + Sample (+ jog) | threshold-arm (+ threshold) |
 | Right pad · Shift + right pad · Shift while held · Undo + right pad | punch · latch · latch as-is · reset |
-| Step · same step again · Up / Down | select loop (waveform) · next page · prev/next page |
+| Step · same step again · hold step · Up / Down | select loop (waveform) · next page · overdub · prev/next page |
 | Jog | scrub · in P4: move the touched head |
-| Track 1–4 · Capture · Sample · ≡ | Input FX · Perform · Send FX · Settings · Input Tape · Drift · Sessions |
+| Track 1–4 · Capture · Sample · ≡ | Input · Perform · Send FX · Settings · Dynamic · Drift · Sessions |
+| Capture (held ~0.6 s) | Dynamic sampler on / off (blinks while listening) |
 | ✕ tap · ✕ hold · ✕ + pads + step · ✕ + step · ✕ + step + step | seq run/stop · pattern view · write · clear · extend |
 | ◀ / ▶ (held) | tape stop · tape wind |
 | Undo | revert last overdub, else restore last clear |

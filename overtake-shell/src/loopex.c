@@ -63,6 +63,7 @@ static inline uint64_t lb_cycfrq(void){ return 1; }
  * submission (11.6 ms of deadline for a SCHED_OTHER thread on cores 0-2). */
 #define PS_NQ 16
 #define PS_D  4
+#define DYN_PRE 4410   /* dynamic sampler pre-roll, 100 ms */
 #define PROF_N 10
 static const char *PROF_NAME[PROF_N]={"prep","input","record","voices","punch+drift","master","sendA","sendB","pitchsh","palpunch"};
 #define PROF(k) do{ uint64_t _t=lb_cyc(); s->profAcc[k]+=_t-_pc; _pc=_t; }while(0)
@@ -423,6 +424,7 @@ typedef struct {
     long psEngBlock;                  /* block the current engagement started on */
     _Atomic float psSemiReq; float psSemiApplied;   /* semitones: stored by the callback, applied by the worker (atomic: it crosses threads) */
     int psLate; long psLateCount; double psReady;   /* result missing -> ride to dry over ~3 ms; count for the profile */
+    int dynDie;                       /* dynamic sampler Sustain: samples until this capture is paused (0 = none / infinite) */
     double pitchPow; float pitchPowCache;          /* pow(2,pitch): recomputed only when Pitch moves */
     double panL_c, panR_c; float panTrigCache;     /* pan law cos/sin: only when smoothed pan moves */
     double disintFade; float disintCache;          /* pow(0.55,gen): only when a generation lands */
@@ -551,10 +553,17 @@ typedef struct {
     int inSource;                          /* 0 Line, 1 Master, 2-5 = Schwung S1-4 (pub), 6-9 = Move M1-4 (link-in), 10 = own master out */
     int inChan;                            /* 0 Stereo, 1 Left->both, 2 Right->both, 3 Sum: a mono synth on one jack records to both sides */
     float tdCache; double tdG, tdMk;       /* tape Drive gain + makeup, recomputed when the knob moves */
-    float inLowFreq;                       /* input EQ low-shelf corner, 40-400 Hz log (0.9.3) */
-    /* Dynamic sampler (Capture button, 0.9.3): input-triggered capture into the pads.
+    float inLowFreq;                       /* input EQ low-shelf corner, 40-400 Hz log (0.9.2) */
+    /* Dynamic sampler (Capture button, 0.9.2): input-triggered capture into the pads.
      * dynMode 0 Off · 1 Level · 2 Onset · 3 Phrase · 4 Pitch · 5 Novelty · 6 Clock */
     int dynMode; float dynSense; int dynSize; int dynSpread; float dynError; float dynSustain;
+    int16_t dynPreL[DYN_PRE], dynPreR[DYN_PRE]; int dynPreW;   /* 100 ms pre-roll ring: a capture keeps the transient that triggered it */
+    double dynEnvF, dynEnvS;      /* fast / slow peak envelopes of the input */
+    int dynRecVoice;              /* -1 idle, else the voice being captured into */
+    int dynRecLeft;               /* samples left in the capture, -1 = until the input goes quiet */
+    int dynHold, dynQuiet, dynArmed, dynCursor, dynClockLeft;
+    long dynCount; int dynLastPad;
+    int dynOverwrite, dynWait, dynFull;   /* filled pads are only replaced once the player said yes; until then a full range parks the sampler and raises dynFull for the UI */
     int inSrcLive;                         /* 1 when the selected source delivered audio this block; 0 = stem unavailable, fell back to Line */
     la_in_shm_t *laShm; int laFd; uint32_t laRead; int laSlotCur;   /* Link Audio track source (OG Move tracks) */
     bpa_shm_t *bpaShm; int bpaFd; uint32_t bpaRead; int bpaSlotCur; /* Schwung published stems source */
@@ -1170,17 +1179,35 @@ static void voice_randomize(Voice *v, double amt) {
     #define RU01() (lb_rand(&v->rng)*0.5+0.5)
     #define RF(field,lo,hi) do{ double r=(lo)+RU01()*((hi)-(lo)); v->field=(float)((double)v->field+(r-(double)v->field)*amt); }while(0)
     #define RI(field,n)     do{ if(RU01()<amt){ int _m=(int)(RU01()*(n)); if(_m>=(n))_m=(n)-1; v->field=_m; } }while(0)
-    RF(pitch,-2.0,2.0); RF(filter,0.0,1.0); RF(pan,-1.0,1.0); RF(volume,0.4,1.0);
+    /* Speed and Pitch move in MUSICAL intervals, complementary: the total transposition
+     * (speed + shift = what you hear) is drawn from consonant intervals, speed from musical
+     * ones, and Pitch is whatever makes the sum land - so half tempo at the same key, or a
+     * fifth up in both, never 3.7 semitones of detune. 30% of the time the pair stays at
+     * unison. Applied with probability amt (an interval half-applied is not an interval). */
+    if(RU01()<amt && RU01()>=0.3){
+        /* Guardrail by enumeration, not by luck. Allowed intervals: octaves, fifths and major /
+         * minor thirds, plus their compounds inside two octaves. The heard transposition T = S+P
+         * and the tempo interval S are both drawn from that set; P = T-S closes the sum and must
+         * fit the Pit knob (+-24). Every valid (T,S) pair is counted and one is picked uniformly,
+         * so |T| <= 24 and a stray tritone cannot happen. */
+        static const int OK[17]={-24,-19,-16,-15,-12,-7,-4,-3,0,3,4,7,12,15,16,19,24};
+        int nv=0; for(int a=0;a<17;a++) for(int b=0;b<17;b++){ int P_=OK[a]-OK[b]; if(P_>=-24&&P_<=24&&!(OK[a]==0&&OK[b]==0)) nv++; }
+        int pick=(int)(RU01()*nv); if(pick>=nv)pick=nv-1;
+        int T=0,S=0,P=0;
+        for(int a=0;a<17&&pick>=0;a++) for(int b=0;b<17&&pick>=0;b++){ int P_=OK[a]-OK[b]; if(P_>=-24&&P_<=24&&!(OK[a]==0&&OK[b]==0)){ if(pick==0){ T=OK[a]; S=OK[b]; P=P_; } pick--; } }
+        v->pitch=(float)S/12.0f; v->clock=(float)P/12.0f;   /* both knobs are in octaves; Pit shows semitones */
+    }
+    RF(filter,0.0,1.0); RF(pan,-1.0,1.0);                                  /* loop Volume (= head 1) is never touched */
     RF(loopStart,0.0,0.95); RF(loopEnd,0.05,1.0);
     if(RU01()<amt) v->reverse=(RU01()<0.5)?0.0f:1.0f;
-    RF(send,0.0,1.0); RF(sendB,0.0,1.0); RF(clock,-2.0,2.0); RF(djReso,0.0,1.0);
-    RF(saturation,0.0,1.0); RF(comp,0.0,1.0); RF(wowFlutter,0.0,1.0); RF(scatter,0.0,1.0); RF(glitch,0.0,1.0);
+    RF(send,0.0,0.6); RF(sendB,0.0,0.6); RF(djReso,0.0,1.0);            /* sends, comp and sat: never past 60% */
+    RF(saturation,0.0,0.6); RF(comp,0.0,0.6); RF(wowFlutter,0.0,1.0); RF(scatter,0.0,1.0); RF(glitch,0.0,1.0);
     RF(tiltEQ,-1.0,1.0); RF(eqBass,-1.0,1.0); RF(eqPresFreq,0.0,1.0); RF(eqPresAmt,-1.0,1.0); RF(eqTreble,-1.0,1.0);
     RF(ampAtk,0.0,1.0); RF(ampRel,0.0,1.0);
-    for(int k=0;k<4;k++){ RF(ph[k].spd,0.0,1.0);
-        if(k==0){ if(RU01()<amt){ int m=1+(int)(RU01()*4.0); if(m>4)m=4; v->ph[0].mode=m; } }   /* head 1 never Off */
-        else RI(ph[k].mode,5); }
-    for(int k=1;k<4;k++){ RF(hVol[k],0.4,1.0); RF(hPan[k],-1.0,1.0); }
+    /* Playheads: speed is pitch and harmony, so it is never randomised. Heads 2-4 are switched
+     * on (a mode) or off; only the pan of a head that ended up active is randomised. Head 1
+     * keeps its mode; head volumes are left alone. */
+    for(int k=1;k<4;k++){ RI(ph[k].mode,5); if(v->ph[k].mode>0) RF(hPan[k],-1.0,1.0); }
     studer_eq_update(v); tilt_eq_update(v);
     #undef RF
     #undef RI
@@ -1190,6 +1217,84 @@ static inline void voice_clear(Voice *v) {
     if(v->loopLen>0)v->savedLoopLen=v->loopLen;   /* remember for undo (buffer samples are kept) */
     v->state=VS_EMPTY;v->loopLen=0;v->recHead=0;v->playHead=0;v->playPhase=0.0;v->dubSamples=0;v->disintGen=0;
     v->glLastSlice=-1;v->stabLpStateL=0.0;v->stabLpStateR=0.0;v->muted=0;
+}
+/* ---- Dynamic sampler (Capture button) ------------------------------------------------
+ * The input plays the sampler: a capture is an ordinary recording into one of the pads
+ * (undoable clear, VS_RECORDING, closed to VS_PLAYING), so it gets the tape stage, the
+ * loop pages, the LEDs - everything a finger-recorded loop gets. What was on the pad is
+ * REPLACED, never stacked (Onward). Spread is how many pads the sampler rotates through
+ * from the selected one (1 = Onward, N = Continua's Dimension); muted, armed and
+ * user-recording pads are skipped, which is the 'lock'. Error mutates a fresh capture
+ * by that fraction; Sustain pauses it after a while (its own Decay fades it), so the
+ * pad is free for the next round. All of it is callback-safe field work. */
+static inline double punch_beat(void);   /* defined with the punch engine, below */
+static inline double dyn_thr(const loopex_t *s){ return pow(10.0,(-60.0+54.0*(double)s->dynSense)/20.0); }   /* Sense: -60 .. -6 dBFS */
+static int dyn_size_samples(const loopex_t *s){
+    static const double beats[8]={0.25,0.5,1.0,2.0,4.0,8.0,16.0,32.0};   /* 1/16 .. 8 bars (4/4) */
+    int i=s->dynSize; if(i<0)i=0; if(i>7)i=7;
+    double n=punch_beat()*beats[i]; if(n>(double)LOOP_SAMPLES)n=(double)LOOP_SAMPLES; return (int)n;
+}
+static int dyn_sustain_samples(const loopex_t *s){
+    double k=(double)s->dynSustain; if(k>=0.99) return 0;                 /* top of the knob = hold forever */
+    return (int)(SR*pow(60.0,k));                                          /* 1 s .. 60 s, log */
+}
+static void dyn_start(loopex_t *s, int preroll){
+    int sel=s->selTrack-1; if(sel<0||sel>=NUM_VOICES)sel=0;
+    int spread=s->dynSpread; if(spread<1)spread=1; if(spread>NUM_VOICES)spread=NUM_VOICES;
+    int t=-1, filled=0;
+    for(int k=0;k<spread;k++){ int slot=(s->dynCursor+k)%spread; int ci=(sel+slot)%NUM_VOICES; Voice *v=&s->voice[ci];
+        if(v->muted||v->armed||v->state==VS_RECORDING||v->state==VS_OVERDUBBING) continue;
+        if(v->loopLen>0 && !s->dynOverwrite){ filled=1; continue; }      /* holds a loop: not without permission */
+        t=ci; s->dynCursor=slot; break; }
+    if(t<0){ if(filled){ s->dynWait=1; s->dynFull=1; } return; }         /* full: park, and let the UI ask */
+    Voice *v=&s->voice[t];
+    voice_clear(v);                                                         /* what was there is replaced - and Undo has it */
+    v->state=VS_RECORDING; v->loopLen=0; v->recHead=0; v->disintGen=0; v->dynDie=0;
+    if(preroll){ int r=s->dynPreW;                                          /* oldest sample first */
+        for(int i=0;i<DYN_PRE;i++){ v->bufferL[i]=s->dynPreL[r]; v->bufferR[i]=s->dynPreR[r]; r++; if(r>=DYN_PRE)r=0; }
+        v->recHead=DYN_PRE; }
+    int free_=(s->dynMode==3||s->dynSize>=8);                                /* Phrase, or Size = Free: run until quiet */
+    s->dynRecLeft = free_ ? -1 : dyn_size_samples(s)-v->recHead; if(!free_ && s->dynRecLeft<64) s->dynRecLeft=64;
+    s->dynRecVoice=t; s->dynQuiet=0; s->dynCount++; s->dynLastPad=t;
+}
+static void dyn_finish(loopex_t *s){
+    Voice *v=&s->voice[s->dynRecVoice];
+    if(v->state==VS_RECORDING){ v->loopLen=v->recHead; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING;
+        if(s->dynError>0.001f) voice_randomize(v,(double)s->dynError);
+        v->dynDie=dyn_sustain_samples(s); }
+    s->dynRecVoice=-1; s->dynHold=(int)(SR*0.05); s->dynArmed=0;
+    int spread=s->dynSpread; if(spread<1)spread=1; s->dynCursor=(s->dynCursor+1)%spread;
+}
+/* Per sample, on the finished input, before the record loop. */
+static inline void dyn_sample(loopex_t *s, int16_t inSL, int16_t inSR){
+    s->dynPreL[s->dynPreW]=inSL; s->dynPreR[s->dynPreW]=inSR; if(++s->dynPreW>=DYN_PRE)s->dynPreW=0;
+    double a=(double)(abs(inSL)>abs(inSR)?abs(inSL):abs(inSR))/32768.0;
+    s->dynEnvF+=(a>s->dynEnvF)?(a-s->dynEnvF)*0.2:(a-s->dynEnvF)*0.0005;   /* ~0.1 ms up, ~45 ms down */
+    s->dynEnvS+=(a-s->dynEnvS)*0.00008;                                       /* ~280 ms running level */
+    if(s->dynHold>0)s->dynHold--;
+    double thr=dyn_thr(s);
+    if(s->dynRecVoice>=0){
+        Voice *v=&s->voice[s->dynRecVoice]; int stop=0;
+        if(v->state!=VS_RECORDING) stop=1;                                     /* the player took the pad back */
+        else if(s->dynRecLeft>0){ if(--s->dynRecLeft<=0) stop=1; }
+        else { if(a<thr*0.3) s->dynQuiet++; else s->dynQuiet=0;                /* Free / Phrase: 200 ms of quiet ends it, after at least 100 ms */
+               if(s->dynQuiet>=(int)(SR*0.2) && v->recHead>=(int)(SR*0.1)) stop=1; }
+        if(v->recHead>=LOOP_SAMPLES-1) stop=1;
+        if(stop) dyn_finish(s);
+        return;
+    }
+    if(s->dynHold>0||s->dynWait) return;
+    int trig=0;
+    switch(s->dynMode){
+        case 1: case 3:   /* Level / Phrase: cross the threshold, re-arm once it fell to half */
+            if(!s->dynArmed){ if(s->dynEnvF<thr*0.5) s->dynArmed=1; } else if(s->dynEnvF>thr) trig=1; break;
+        case 2:           /* Onset: the fast envelope jumps well above the running level */
+            if(!s->dynArmed){ if(s->dynEnvF<s->dynEnvS*1.2+1e-4) s->dynArmed=1; } else if(s->dynEnvF-s->dynEnvS*2.0>thr) trig=1; break;
+        case 6:           /* Clock: every Size, if there is signal */
+            if(--s->dynClockLeft<=0){ s->dynClockLeft=dyn_size_samples(s); if(s->dynClockLeft<64)s->dynClockLeft=64; if(s->dynEnvS>thr*0.1) trig=2; } break;
+        default: break;   /* Pitch / Novelty: analysis on the worker, next release */
+    }
+    if(trig) dyn_start(s, trig==1);                                            /* Clock captures start on the beat, no pre-roll */
 }
 /* Undo a clear: the buffer was never wiped, so restore length + playback. */
 static inline void voice_unclear(Voice *v) {
@@ -2027,7 +2132,8 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     for(int i=0;i<NUM_PUNCH;i++){s->punchParams[i][0]=0.5f;s->punchParams[i][1]=0.5f;s->punchParams[i][2]=1.0f;s->punchParams[i][3]=1.0f;s->punchPress[i]=0.0f;}
     s->inLow=0.0f;s->inMid=0.0f;s->inMidFreq=0.5f;s->inHigh=0.0f;s->inHighFreq=0.748f;   /* 0.748 on the log sweep = 10 kHz, the 424's shelf */
     s->inLowFreq=0.39794f;   /* 40*10^0.398 = 100 Hz, the 424's shelf */
-    s->dynMode=0;s->dynSense=0.5f;s->dynSize=4;s->dynSpread=1;s->dynError=0.0f;s->dynSustain=1.0f;
+    s->dynMode=0;s->dynSense=0.5f;s->dynSize=8;s->dynSpread=16;   /* defaults: Size = Free (record until quiet), Spread = all 16 pads */s->dynError=0.0f;s->dynSustain=1.0f;
+    s->dynRecVoice=-1;s->dynRecLeft=0;s->dynHold=0;s->dynOverwrite=0;s->dynWait=0;s->dynFull=0;s->dynArmed=0;s->dynCursor=0;s->dynClockLeft=1;s->dynCount=0;s->dynLastPad=-1;
     bq_reset(&s->inEqLo);bq_reset(&s->inEqMid);bq_reset(&s->inEqHi);bq_reset(&s->inTapeLp);bq_reset(&s->inTapeHp);
     bq_reset(&s->inBump); s->bumpCache=-1.0f;
     s->busA=pfx_create(44100.0f); s->busB=pfx_create(44100.0f); s->punchFx=pfx_create(44100.0f);
@@ -2126,7 +2232,7 @@ static void on_midi(void *inst, const uint8_t *msg, int len, int source) {
 
 /* ---- Input EQ (record chain) ---- */
 static void input_eq_update(loopex_t *s){
-    /* Input EQ (0.9.3): a blend of the Studer 962 presence band (150 Hz-7 kHz, the wider and
+    /* Input EQ (0.9.2): a blend of the Studer 962 presence band (150 Hz-7 kHz, the wider and
      * more musical sweep) and the Tascam 424 MkII/MkIII channel EQ (100 Hz and 10 kHz shelf
      * points, +-12 dB mid - owner's manual p.11/36, spec p.45): 2nd-order shelves +-15 dB
      * with a sweepable low corner (40-400 Hz, default 100 = the 424's point) and a high
@@ -2857,6 +2963,8 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     input_eq_update(s);   /* record-chain EQ + tape-speed */
     punch_prep(s);   /* per-block: punch slot tone-filter coeffs */
     fxseq_tick(s,frames);   /* FX sequencer: step clock, chance, gate */
+    for(int vi=0;vi<NUM_VOICES;vi++){ Voice *v=&s->voice[vi];   /* Dynamic Sustain: a capture's time is up -> pause, its Decay fades it */
+        if(v->dynDie>0){ v->dynDie-=frames; if(v->dynDie<=0){ v->dynDie=0; if(v->state==VS_PLAYING) v->state=VS_PAUSED; } } }
 
     PROF(0);
     for(int n=0;n<frames;n++){
@@ -2933,6 +3041,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         if(fabs(s->inHigh)>0.007f){inL=bq_L(&s->inEqHi,inL);inR=bq_R(&s->inEqHi,inR);}
         int16_t inSL=(int16_t)lb_clampd(inL*32767.0,-32767.0,32767.0);
         int16_t inSR=(int16_t)lb_clampd(inR*32767.0,-32767.0,32767.0);
+        if(s->dynMode>0||s->dynRecVoice>=0) dyn_sample(s,inSL,inSR);   /* Dynamic sampler: may open or close a recording */
 
         /* Threshold-armed record: an armed track starts the moment input crosses. */
         { double lvl=fabs(inL)>fabs(inR)?fabs(inL):fabs(inR);
@@ -3302,7 +3411,11 @@ static void set_param(void *inst, const char *key, const char *val) {
     SETFR("inLow",inLow,-1.0,1.0) SETFR("inMid",inMid,-1.0,1.0) SETFR("inMidFreq",inMidFreq,0.0,1.0)
     SETFR("inHigh",inHigh,-1.0,1.0) SETFR("inHighFreq",inHighFreq,0.0,1.0) SETFR("inLowFreq",inLowFreq,0.0,1.0)
     SETFR("dynSense",dynSense,0.0,1.0) SETFR("dynError",dynError,0.0,1.0) SETFR("dynSustain",dynSustain,0.0,1.0)
-    if(strcmp(key,"dynMode")==0){ int i=match_enum(val,dynmode_opts,7); s->dynMode=(i>=0)?i:(int)lb_clampf((float)atof(val),0,6); return; }
+    if(strcmp(key,"dynMode")==0){ int i=match_enum(val,dynmode_opts,7); int nm=(i>=0)?i:(int)lb_clampf((float)atof(val),0,6);
+        if(nm!=s->dynMode){ s->dynOverwrite=0; s->dynWait=0; s->dynFull=0; }   /* a fresh start asks again before overwriting */
+        s->dynMode=nm; s->dynClockLeft=1; s->dynArmed=0; return; }
+    if(strcmp(key,"dynOverwrite")==0){ s->dynOverwrite=(atof(val)>0.5); return; }
+    if(strcmp(key,"dynResume")==0){ s->dynWait=0; s->dynFull=0; return; }
     if(strcmp(key,"dynSize")==0){ int i=match_enum(val,dynsize_opts,9); s->dynSize=(i>=0)?i:(int)lb_clampf((float)atof(val),0,8); return; }
     if(strcmp(key,"dynSpread")==0){ s->dynSpread=(int)lb_clampf((float)atof(val),1,16); return; }
     SETFR("tapeNoise",tapeNoise,0.0,1.0) SETFR("tapeDrive",tapeDrive,0.0,1.0) SETFR("tapeHF",tapeHF,0.0,1.0)
@@ -3356,11 +3469,12 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"selTrack")==0){s->selTrack=(int)lb_clampf((float)atof(val),1.0f,16.0f);return;}
     if(strcmp(key,"clearSel")==0){float t=(float)atof(val);if(t>0.5f){int ci=s->selTrack-1;
         if(ci>=0&&ci<NUM_VOICES)voice_clear(&s->voice[ci]);}return;}
-    if(strcmp(key,"clearAll")==0){float t=(float)atof(val);if(t>0.5f){for(int ci=0;ci<NUM_VOICES;ci++)voice_clear(&s->voice[ci]);}return;}
+    if(strcmp(key,"clearAll")==0){float t=(float)atof(val);if(t>0.5f){for(int ci=0;ci<NUM_VOICES;ci++){ voice_clear(&s->voice[ci]); voice_defaults(&s->voice[ci]); }}return;}   /* Sessions > Clear: audio (undoable) AND every loop setting */
     if(strcmp(key,"rndSel")==0){ if(atof(val)>0.5){ int ci=s->selTrack-1; if(ci>=0&&ci<NUM_VOICES) voice_randomize(&s->voice[ci],1.0); } return; }   /* Dynamic > Rnd Pad */
     if(strcmp(key,"rndAll")==0){ if(atof(val)>0.5){ for(int ci=0;ci<NUM_VOICES;ci++) voice_randomize(&s->voice[ci],1.0); } return; }                    /* Dynamic > Rnd All */
-    if(strcmp(key,"resetSel")==0){float t=(float)atof(val);if(t>0.5f){int ci=s->selTrack-1;   /* Sessions > Reset: audio (undoable) + every setting */
-        if(ci>=0&&ci<NUM_VOICES){ voice_clear(&s->voice[ci]); voice_defaults(&s->voice[ci]); }}return;}
+    if(strcmp(key,"resetSel")==0){float t=(float)atof(val);if(t>0.5f){int ci=s->selTrack-1;   /* Sessions > Reset: every SETTING back to factory; the audio and the transport stay */
+        if(ci>=0&&ci<NUM_VOICES){ Voice *v=&s->voice[ci]; VoiceState st=v->state; int len=v->loopLen, hd=v->playHead; double ph=v->playPhase; int mu=v->muted;
+            voice_defaults(v); v->state=st; v->loopLen=len; v->playHead=hd; v->playPhase=ph; v->muted=mu; }}return;}
     int selIdx=s->selTrack-1;if(selIdx<0||selIdx>=NUM_VOICES)return;Voice *v=&s->voice[selIdx];
     SETVFR("v_start",loopStart,0.0,1.0) SETVFR("v_end",loopEnd,0.0,1.0)
     if(strcmp(key,"v_reverse")==0){int idx=match_enum(val,reverse_opts,2);if(idx>=0)v->reverse=(float)idx;else v->reverse=lb_clampf((float)atof(val),0.0f,1.0f);return;}
@@ -3609,6 +3723,9 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
     GETP("dynSense",dynSense) GETP("dynError",dynError) GETP("dynSustain",dynSustain)
     GETE("dynMode",dynMode,dynmode_opts,7); GETE("dynSize",dynSize,dynsize_opts,9);
     if(strcmp(key,"dynSpread")==0) return snprintf(buf,buf_len,"%d",s->dynSpread);
+    if(strcmp(key,"dynCount")==0) return snprintf(buf,buf_len,"%ld,%d",s->dynCount,s->dynLastPad+1);   /* captures so far, last pad */
+    if(strcmp(key,"dynFull")==0) return snprintf(buf,buf_len,"%d",s->dynFull);
+    if(strcmp(key,"dynOverwrite")==0||strcmp(key,"dynResume")==0) return snprintf(buf,buf_len,"%d",s->dynOverwrite);
     GETP("tapeNoise",tapeNoise) GETP("tapeDrive",tapeDrive) GETP("tapeHF",tapeHF)
     if(strcmp(key,"midiIn")==0){ int i=s->midiIn; if(i<0||i>2)i=0; return snprintf(buf,buf_len,"%s",midiin_opts[i]); }
     if(strcmp(key,"midiOut")==0)return snprintf(buf,buf_len,"%s",s->midiOut?"On":"Off");

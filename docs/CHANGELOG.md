@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.5 — unreleased
+## v0.9.5 — 2026-09-23
 
 The biggest change to how Loopex is *played* since the Overtake conversion. It adds a **SYNC** mode
 that locks everything to Move's bars (Loopex stays asynchronous by default), a **Dynamic sampler**

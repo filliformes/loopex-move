@@ -77,7 +77,7 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
 - **Sessions** — 64 slots in `/data/UserData/UserLibrary/Loopex/`; **all disk I/O on a
   `SCHED_OTHER` worker (`lpx-sio`) pinned to cores 0-2**, joined in `destroy_instance`. Audio is
   `sessionNN/sNN_loopNN.wav` (both 1-based, as the pads and slots are numbered) (16-bit stereo WAV, interleaved on the worker in 4096-frame chunks; `wav_write`
-  / `wav_read`); pre-0.9.2 `tNN.raw` (L block then R block) is read as a fallback and removed once
+  / `wav_read`); pre-0.9.5 `tNN.raw` (L block then R block) is read as a fallback and removed once
   a `.wav` has been written over it. Sessions page K5 = **Clear** (`clearAll`: `voice_clear` + `voice_defaults` on all 16) and K6 = **Reset** (`resetSel`) / K7 = **Reset All** (`resetAll`, one undo group) (`resetSel`:
   `voice_defaults` with state/loopLen/playPhase/muted preserved - settings only, audio stays; the same
   function `create_instance` uses), both with the Del-style
@@ -106,7 +106,7 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   A stem that is not there (host < 1.4 or `link_audio_publish` off) falls back to Line; `inSrcLive`
   (get_param) is 0 then and the UI says so while Settings p1 is open. `inChan` (Stereo/Left/Right/Sum)
   is applied right after the source read.
-- **Dynamic sampler** (0.9.2, `dyn_*` in loopex.c): per sample on the finished input, before the
+- **Dynamic sampler** (0.9.5, `dyn_*` in loopex.c): per sample on the finished input, before the
   record loop. A capture = `voice_clear` (undoable) + `VS_RECORDING` + 100 ms pre-roll from a ring,
   closed to `VS_PLAYING` at Size (tempo via `punch_beat()`) or after 200 ms of quiet (Free/Phrase);
   then `voice_randomize(v, dynError)` and a Sustain timer (`dynDie`, paused when it expires). Target
@@ -121,7 +121,7 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   voice_tap/odub clear it. Only the latest capture's undo records survive (`UndoRec.dyn`). Phrase =
   400 ms gap, 1 s minimum. No triggers while InSrc = Self. Capture long-press (600 ms) toggles
   Off <-> last mode; the white-only LED blinks while listening.
-- **ASYNC / SYNC** (0.9.2, Sessions K8 `syncMode`): a beat grid `beatPos` ALWAYS runs (tempo per
+- **ASYNC / SYNC** (0.9.5, Sessions K8 `syncMode`): a beat grid `beatPos` ALWAYS runs (tempo per
   block from get_bpm; pulled onto Move's 0xF8 clock once 0xFA Start / 0xF2 Song Position has locked
   it), so switching never starts anything. `sync_events` fires on beat/bar crossings: syncPend 1 =
   record on the next beat (a tap <=1/8 beat late starts now with the pre-roll ring, which now always
@@ -139,7 +139,7 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   UI: values re-quantise only when turned; Speed/head speeds on ratios, Start 1/16, End note lengths
   (`v_grid`), header bars.beats (`v_bars`), beat lines on the waveform, pads blink while pending, and
   taps poll instead of predicting the next state.
-- **Tape Wear** (0.9.2, `wear_apply`): per voice a STEREO damage map `wmap[2][WEAR_MAX]` of ~5.8 ms cells
+- **Tape Wear** (0.9.5, `wear_apply`): per voice a STEREO damage map `wmap[2][WEAR_MAX]` of ~5.8 ms cells
   (weakness 70% shared / 30% per track, edge track L ×1.15, 10% cross-spill; file = nc, L, R)
   (WEAR_CELL 256), non-destructive. A head crossing a cell wears it: d += rate·(seed+4d)·(1−d),
   seed from a per-cell hash (weak spots), 15% to the neighbours; rate = 0.0005·400^knob per
@@ -147,10 +147,10 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   level (1−d)(1+d/2), per-lap per-track flicker, rare crackle. Zeroed at a new take and by
   voice_defaults (Reset heals); copied by clone; saved as `sNN_wearNN.bin`; carried by undo records
   (`wmap`/`wmapOn`). Knob `v_wear` / `v<N>.wr`, Tone page K8 (replaced the Heads shortcut).
-- **Loop window** (0.9.2): End is a LENGTH, `effLen = loopEnd*LEN` clamped to `LEN-effStart` (was
+- **Loop window** (0.9.5): End is a LENGTH, `effLen = loopEnd*LEN` clamped to `LEN-effStart` (was
   `loopEnd*avail`). Every jump crossfade is `XF_N` = 256 samples (was 64); Seed slices >= XF_N;
   Ping heads reflect by the overshoot. Revert point before this: commit 906f740.
-- **Undo history** (0.9.2): `UndoRec hist[32]` in `loopex_t`, each with its own stereo buffer + gen
+- **Undo history** (0.9.5): `UndoRec hist[32]` in `loopex_t`, each with its own stereo buffer + gen
   stamps (calloc'd: address space until a loop records into it). Clear all = one AUDIO record per
   pad carrying the settings too (`hasSet`, `undo_audio_set`). Trigger knobs fire once per 400 ms. `undo_audio` SWAPS the pad's buffer pointers with
   the record's (clear / arm / Dynamic overwrite / Clear all - via `loop_clear`); `undo_settings`
@@ -176,7 +176,7 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
 - **5 loop pages** (Up/Down): `Loop · Texture · Tone · Heads · HeadMix`.
   HeadMix = per-head Vol/Pan; **H1V/H1P are the same params as page 1's Vol/Pan** by design.
 - **8 menus** — track buttons 1-4 → Input (p1 Tape / p2 EQ) / Perform / Send FX / Settings; Capture →
-  **Dynamic** (0.9.2; Input Tape merged into Track 1); ≡ → Sessions; ● → Drift; ✕ → FX Seq. **Perform and Settings are two-page.**
+  **Dynamic** (0.9.5; Input Tape merged into Track 1); ≡ → Sessions; ● → Drift; ✕ → FX Seq. **Perform and Settings are two-page.**
 - **Settings p1** ArmTh · ODub · LpFlt · Root · **InCh** (0.9.1; was a duplicate InMon) · InSrc · MIDI · MidiO —
   **p2 is named "Output"** (`MENU_PAGE_NAMES`): Out · LoCut · HiCut · PWide · Char · gSat · Glue · Limit,
   in signal order after the punch bank. **Perform p2:** Cut · Reso · FChar · Clock · ClkMd · ClkAt ·

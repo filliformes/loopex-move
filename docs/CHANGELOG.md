@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.2 — unreleased
+## v0.9.5 — unreleased
 
 The biggest change to how Loopex is *played* since the Overtake conversion. It adds a **SYNC** mode
 that locks everything to Move's bars (Loopex stays asynchronous by default), a **Dynamic sampler**
@@ -33,7 +33,7 @@ moved* first: some habits from 0.9.1 now do something else.
 
 ### Where things moved
 
-| Control | 0.9.1 | 0.9.2 |
+| Control | 0.9.1 | 0.9.5 |
 |---|---|---|
 | Track button 1 | Input FX (one page) | **Input**: 1st press *Input Tape*, 2nd press *Input EQ*, 3rd press closes; Up/Down also flip its pages |
 | Capture, short press | Input Tape menu (on press) | **Dynamic** menu (opens on release) |
@@ -71,7 +71,7 @@ triplet values included).
 - **Un-pausing waits for the next bar.** The pad **blinks green** until it comes back in, from Start.
 - **Move's Play restarts every playing loop on bar 1.** Paused loops stay paused. Until Move sends Play
   (or a song position) Loopex keeps Move's tempo on its own grid, so its bar 1 may not be Move's bar 1.
-- **Loops follow tempo changes, tape-style.** Every take made in 0.9.2, in ASYNC too, remembers the
+- **Loops follow tempo changes, tape-style.** Every take made in 0.9.5, in ASYNC too, remembers the
   tempo it was recorded at. In SYNC, speed and pitch bend together by *Move's tempo ÷ recorded tempo*
   (gliding over about 0.1 s, limited to ¼×–4×). So switching to SYNC after changing Move's tempo
   audibly re-pitches those loops; it never jumps. Loops recorded in 0.9.1 have no stored tempo and
@@ -244,6 +244,8 @@ no confirmation. One Undo brings it all back.
 - **One press brings back a whole gesture.** A gesture that touched all sixteen pads (Rnd All, Reset
   All, Sessions → Clear) comes back in one press, but uses 16 of the 32 steps. Clears and overwrites
   come back instantly.
+- **When the history is full, the oldest gesture drops out whole,** never half of it: an old Clear
+  never comes back as 15 pads of 16.
 - **Not undoable:** knob moves, and the first recording onto an empty pad.
 - **Loading a session starts a fresh history**, so Undo can't put the last session's audio on its pads.
 - **Messages:** `Undo: T3 overdub`, `Undo: T3 audio`, `Undo: T3 settings`, `Undo: 16 pads`, or
@@ -311,6 +313,10 @@ no confirmation. One Undo brings it all back.
   heals its Wear; the audio stays and keeps playing. **RstAll** (K7, `RESET ALL PADS?`) does it for all
   sixteen. "Factory" is exactly what a fresh Loopex starts with. (Thanks Hannes.)
 - **Mode** (K8): ASYNC / SYNC, above.
+- **Saving can't damage a session.** Each WAV is written to a temporary file and only replaces the old
+  one once it is complete on disk, so a full disk or a power cut mid-save leaves the previous version
+  intact. While a session loads (a few seconds), taps, overdubs, clears and Undo are ignored, and Dynamic is
+  switched off, so nothing can record into a pad that is being filled.
 - **In every question, K5 = NO and K8 = YES.** After a question opens or is answered, the knobs pause
   until they have all been still for 0.4 s. The rest of a twist used to land on NO (so Clear cancelled
   itself) or on the page underneath (flipping Mode).
@@ -342,7 +348,7 @@ no confirmation. One Undo brings it all back.
 
 Changed in 0.9.0, never announced:
 - **Overdub was moved from a double-tap to Undo + pad** in 0.9.0. The double-tap made every pad press
-  wait for a possible second one. *In 0.9.2 overdub moves again, to the step-button hold (see Loops).*
+  wait for a possible second one. *In 0.9.5 overdub moves again, to the step-button hold (see Loops).*
 - **Tapping a recorded pad:** the first tap plays, the second **stops** it, and the third starts it
   again **from the Start point**, re-phasing all four playheads.
 
@@ -425,7 +431,7 @@ physics, a long list of click fixes, and a hardware-profiled CPU pass that took 
   silence — is fixed at the source.
 
 ### CPU pass (profiled on the Move)
-- **Per-loop pitch shifters run on their own worker thread** (`lpx-ps`, SCHED_OTHER, cores 0–2; 0.9.2
+- **Per-loop pitch shifters run on their own worker thread** (`lpx-ps`, SCHED_OTHER, cores 0–2; 0.9.5
   splits it into two, `lpx-ps0` / `lpx-ps1`, after a full randomise with 13+ pitched loops overran one).
   A Signalsmith hop cost ~600 µs — a quarter of the audio callback's slack — for one pitched loop;
   it now costs the callback two `memcpy`s. Results are collected four blocks later (latency 61 ms,

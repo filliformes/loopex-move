@@ -451,7 +451,7 @@ typedef struct {
     int recTarget;                    /* SYNC: keep recording until this length (the tap-close rounded up to a bar) */
     double recBpm, tempoSm;           /* tempo the loop was recorded at; the glided varispeed ratio that follows Move's tempo */
     double winS, winL; int winLEN;    /* glided loop window (start, length in samples); snaps when the recording changes */
-    /* Tape Wear (0.9.2): the knob is a RATE of wear; the map is the damage, fixed to the tape. */
+    /* Tape Wear (0.9.5): the knob is a RATE of wear; the map is the damage, fixed to the tape. */
     float wear, wearCache; double wearRate; int wearAny;
     float wmap[2][WEAR_MAX];          /* oxide lost per cell, per track (L = the tape-edge track), 0..1 */
     int wLast[4]; double wLpL[4], wLpR[4], wGL[4], wGR[4], wTL[4], wTR[4];   /* per head: last cell, spacing-loss filter, flicker gain + target */
@@ -595,8 +595,8 @@ typedef struct {
     int inSource;                          /* 0 Line, 1 Master, 2-5 = Schwung S1-4 (pub), 6-9 = Move M1-4 (link-in), 10 = own master out */
     int inChan;                            /* 0 Stereo, 1 Left->both, 2 Right->both, 3 Sum: a mono synth on one jack records to both sides */
     float tdCache; double tdG, tdMk;       /* tape Drive gain + makeup, recomputed when the knob moves */
-    float inLowFreq;                       /* input EQ low-shelf corner, 40-400 Hz log (0.9.2) */
-    /* Dynamic sampler (Capture button, 0.9.2): input-triggered capture into the pads.
+    float inLowFreq;                       /* input EQ low-shelf corner, 40-400 Hz log (0.9.5) */
+    /* Dynamic sampler (Capture button, 0.9.5): input-triggered capture into the pads.
      * dynMode 0 Off · 1 Level · 2 Onset · 3 Phrase · 4 Pitch · 5 Novelty · 6 Clock */
     int dynMode; float dynSense; int dynSize; int dynSpread; float dynError; float dynSustain;
     int16_t dynPreL[DYN_PRE], dynPreR[DYN_PRE]; int dynPreW;   /* 100 ms pre-roll ring: a capture keeps the transient that triggered it */
@@ -608,7 +608,7 @@ typedef struct {
     long dynCount; int dynLastPad;
     int dynOverwrite, dynWait, dynFull, dynBase;   /* dynBase: the range's first pad, fixed when Dynamic is switched on */
     long clkTick; int clkAge, clkFire, clkSeenStart;
-    /* SYNC (0.9.2): a beat grid that always runs, so switching modes never has to start anything.
+    /* SYNC (0.9.5): a beat grid that always runs, so switching modes never has to start anything.
      * beatPos advances by the tempo every sample and is pulled onto Move's MIDI clock (Start / Song
      * Position give it the bar). */
     int sync; double bpm, beatPos; long beatIdx, barIdx; int startEvt, gridLocked; int dynSizeS; long dynClkIdx;   /* Move's MIDI clock (24 per beat): ticks since Start, samples since the last tick, a boundary to act on */
@@ -673,7 +673,7 @@ typedef struct {
     PunchSlot pslot[NUM_PSLOTS];
     FxSeq fx; int punchFxId;           /* FX sequencer (Delete button) + the Palette punch slot's current effect */
     /* Overdub undo: copy-on-write of the samples an overdub overwrites (one shared buffer) */
-    /* Undo history (0.9.2): 32 records, 16 gestures deep at worst (a gesture on all 16 pads is one
+    /* Undo history (0.9.5): 32 records, 16 gestures deep at worst (a gesture on all 16 pads is one
      * group). Each record owns a stereo loop buffer + a per-sample generation stamp - address
      * space only until a loop records into it (the Move has ~1 GB free with Loopex loaded). AUDIO records
      * (clear, arm, Dynamic overwrite, Clear all) take the pad's audio by SWAPPING buffer
@@ -720,13 +720,13 @@ static int  get_param(void *inst, const char *key, char *buf, int buf_len);
 /* ---- Session store: settings blob + raw int16 loop buffers, 8 numbered slots ----
  * Layout: /data/UserData/UserLibrary/Loopex/sessionNN/{state.txt,meta.txt,name.txt,sNN_loopNN.wav}
  * (UserLibrary is what the Schwung Manager's file browser shows, next to Magneto Recs; before
- * 0.9.2 it was /data/UserData/schwung/loopex-sessions with tNN.raw - migrated on first scan)
+ * 0.9.5 it was /data/UserData/schwung/loopex-sessions with tNN.raw - migrated on first scan)
  * (outside the module dir so reinstalls keep sessions — per the Overtake SDK). */
 #define SESS_DIR_BASE "/data/UserData/UserLibrary/Loopex"
-#define SESS_DIR_OLD  "/data/UserData/schwung/loopex-sessions"   /* pre-0.9.2 location */
+#define SESS_DIR_OLD  "/data/UserData/schwung/loopex-sessions"   /* pre-0.9.5 location */
 #define NUM_SLOTS 64
 /* Worker-only: refresh the slot-name cache from disk. */
-/* One-time move of pre-0.9.2 sessions into UserLibrary. rename() within /data is an atomic
+/* One-time move of pre-0.9.5 sessions into UserLibrary. rename() within /data is an atomic
  * directory move - nothing is copied, nothing can be half-moved. A slot that already exists
  * at the new place is left alone. WORKER ONLY. */
 static int wav_write(const char *path,const int16_t *L,const int16_t *R,int len);   /* defined below, with wav_read */
@@ -743,9 +743,9 @@ static int raw_to_wav(const char *raw,const char *wav){   /* WORKER ONLY: a 45 s
 /* Bring every older session up to the current layout. Idempotent, runs on every scan
  * (create + after each session op), WORKER ONLY. Three generations to absorb:
  *   <= 0.9.1      schwung/loopex-sessions/slotN/tNN.raw        (raw: L block then R block)
- *   0.9.2 (first) UserLibrary/Loopex/slotN/loopNN.wav
- *   0.9.2 (2nd)   UserLibrary/Loopex/sessionNN/sessionNN_loopNN.wav
- *   0.9.2         UserLibrary/Loopex/sessionNN/sNN_loopNN.wav
+ *   0.9.5 (first) UserLibrary/Loopex/slotN/loopNN.wav
+ *   0.9.5 (2nd)   UserLibrary/Loopex/sessionNN/sessionNN_loopNN.wav
+ *   0.9.5         UserLibrary/Loopex/sessionNN/sNN_loopNN.wav
  * Folders and files move by rename() (atomic within /data); a .raw is converted and only
  * then removed. sessionNN sorts correctly in the Manager's file browser; slot1/slot10/slot11
  * did not. */
@@ -789,19 +789,26 @@ static void wav_put32(uint8_t *p,uint32_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>
 static void wav_put16(uint8_t *p,uint16_t v){ p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
 static uint32_t wav_get32(const uint8_t *p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
 static uint16_t wav_get16(const uint8_t *p){ return (uint16_t)(p[0]|(p[1]<<8)); }
+/* Atomic: written to <path>.tmp, synced, then renamed over <path>. A .wav that exists is therefore always
+ * complete - the migration deletes a session's old .raw once its .wav exists, and a save replaces the
+ * previous good .wav, so a half-written file (full disk, power cut) must never carry the final name. */
 static int wav_write(const char *path,const int16_t *L,const int16_t *R,int len){
-    FILE *g=fopen(path,"wb"); if(!g) return 0;
+    char tmp[400]; if(snprintf(tmp,sizeof tmp,"%s.tmp",path)>=(int)sizeof tmp) return 0;
+    FILE *g=fopen(tmp,"wb"); if(!g) return 0;
     uint8_t h[44]; uint32_t data=(uint32_t)len*4u;
     memcpy(h,"RIFF",4); wav_put32(h+4,36u+data); memcpy(h+8,"WAVE",4);
     memcpy(h+12,"fmt ",4); wav_put32(h+16,16); wav_put16(h+20,1); wav_put16(h+22,2);
     wav_put32(h+24,44100); wav_put32(h+28,44100u*4u); wav_put16(h+32,4); wav_put16(h+34,16);
     memcpy(h+36,"data",4); wav_put32(h+40,data);
-    if(fwrite(h,1,44,g)!=44){ fclose(g); return 0; }
-    int16_t buf[4096*2]; int ok=1;
+    int16_t buf[4096*2]; int ok=(fwrite(h,1,44,g)==44);
     for(int i=0;i<len&&ok;i+=4096){ int n=len-i; if(n>4096)n=4096;
         for(int j=0;j<n;j++){ buf[j*2]=L[i+j]; buf[j*2+1]=R[i+j]; }
         ok=(fwrite(buf,sizeof(int16_t),(size_t)n*2,g)==(size_t)n*2); }
-    fclose(g); return ok;
+    if(ok) ok=(fflush(g)==0 && fsync(fileno(g))==0);
+    if(fclose(g)!=0) ok=0;
+    if(ok) ok=(rename(tmp,path)==0);
+    if(!ok) remove(tmp);
+    return ok;
 }
 /* 16-bit PCM, 1 or 2 channels, chunks in any order. Returns frames read; 0 = not usable. */
 static int wav_read(const char *path,int16_t *L,int16_t *R,int maxlen){
@@ -944,7 +951,7 @@ static void *session_worker(void *arg){
             FILE *f=fopen(path,"w"); if(f){ fputs(s->sio.stateBuf,f); fclose(f); }
             for(int i=0;i<NUM_VOICES;i++){
                 Voice *v=&s->voice[i]; int len=v->loopLen;
-                char rawp[352]; snprintf(rawp,sizeof rawp,"%s/t%02d.raw",dir,i);   /* pre-0.9.2 format */
+                char rawp[352]; snprintf(rawp,sizeof rawp,"%s/t%02d.raw",dir,i);   /* pre-0.9.5 format */
                 snprintf(path,sizeof path,"%s/s%02d_loop%02d.wav",dir,slot,i+1);   /* s01_loop01..loop16: the folder already says session */
                 if(len<=0){ remove(path); remove(rawp); continue; }
                 if(wav_write(path,v->bufferL,v->bufferR,len)) remove(rawp);   /* the .raw goes only once the .wav is safely written */
@@ -972,11 +979,12 @@ static void *session_worker(void *arg){
                 Voice *v=&s->voice[i];
                 v->state=VS_EMPTY; v->loopLen=0;      /* render now skips this voice — safe to fill */
                 v->playPhase=0.0; v->playHead=0; v->playEnv=0.0; v->muted=0; v->glLastSlice=-1; wear_zero(v);
-                v->wear=0.0f; v->wearCache=-1.0f; v->recBpm=0.0; v->tempoSm=1.0;   /* state.txt only lists non-zero Wear / a known tempo: never inherit the pad's old ones */
+                v->wear=0.0f; v->wearCache=-1.0f; v->recBpm=0.0; v->tempoSm=1.0;
+                v->armed=0; v->syncPend=0; v->recTarget=0; v->dynDie=0; v->dynSpent=0;   /* nothing from the old pad (an arm, a Sustain timer, a bar start) acts on the loaded loop */   /* state.txt only lists non-zero Wear / a known tempo: never inherit the pad's old ones */
                 int len=lens[i]; if(len>LOOP_SAMPLES)len=LOOP_SAMPLES; if(len<=0) continue;
                 snprintf(path,sizeof path,"%s/s%02d_loop%02d.wav",dir,slot,i+1);
                 int n=wav_read(path,v->bufferL,v->bufferR,len);
-                if(n<=0){   /* pre-0.9.2 session: raw 16-bit, L block then R block */
+                if(n<=0){   /* pre-0.9.5 session: raw 16-bit, L block then R block */
                     snprintf(path,sizeof path,"%s/t%02d.raw",dir,i);
                     FILE *g=fopen(path,"rb"); if(!g) continue;
                     size_t gl=fread(v->bufferL,sizeof(int16_t),(size_t)len,g);
@@ -985,7 +993,9 @@ static void *session_worker(void *arg){
                 if(n<=0) continue;
                 v->savedLoopLen=n;
                 snprintf(path,sizeof path,"%s/s%02d_wear%02d.bin",dir,slot,i+1);
-                { FILE *wf=fopen(path,"rb"); if(wf){ int nc=0; if(fread(&nc,sizeof nc,1,wf)==1&&nc>0&&nc<=WEAR_MAX&&fread(v->wmap[0],sizeof(float),(size_t)nc,wf)==(size_t)nc&&fread(v->wmap[1],sizeof(float),(size_t)nc,wf)==(size_t)nc) v->wearAny=1; else memset(v->wmap,0,sizeof v->wmap); fclose(wf); } }
+                { FILE *wf=fopen(path,"rb"); if(wf){ int nc=0; if(fread(&nc,sizeof nc,1,wf)==1&&nc>0&&nc<=WEAR_MAX&&fread(v->wmap[0],sizeof(float),(size_t)nc,wf)==(size_t)nc&&fread(v->wmap[1],sizeof(float),(size_t)nc,wf)==(size_t)nc){ v->wearAny=1;
+                      for(int t=0;t<2;t++) for(int c=0;c<nc;c++){ float x=v->wmap[t][c]; if(!(x>=0.0f))x=0.0f; if(x>1.0f)x=1.0f; v->wmap[t][c]=x; } }   /* a corrupt file must not put NaN in the mix */
+                  else memset(v->wmap,0,sizeof v->wmap); fclose(wf); } }
                 __atomic_store_n(&v->loopLen,n,__ATOMIC_RELEASE);   /* publish length LAST, buffers first */
                 v->state=(sts[i]==VS_PLAYING||sts[i]==VS_OVERDUBBING)?VS_PLAYING:VS_PAUSED;
             }
@@ -1003,6 +1013,7 @@ static void *session_worker(void *arg){
                 int len=src->loopLen; if(len>LOOP_SAMPLES)len=LOOP_SAMPLES;
                 dst->state=VS_EMPTY; dst->loopLen=0;   /* render skips it while we copy */
                 dst->playPhase=0.0; dst->playHead=0; dst->playEnv=0.0; dst->glLastSlice=-1; dst->muted=0;
+                dst->armed=0; dst->syncPend=0; dst->recTarget=0; dst->dynDie=0; dst->dynSpent=0;
                 if(len>0){
                     memcpy(dst->bufferL,src->bufferL,(size_t)len*sizeof(int16_t));
                     memcpy(dst->bufferR,src->bufferR,(size_t)len*sizeof(int16_t));
@@ -1325,6 +1336,12 @@ static UndoRec *undo_push(loopex_t *s, int type, int track){
     for(int guard=0;guard<UNDO_N && s->hist[s->histTop].type==UR_PENDING;guard++) s->histTop=(s->histTop+1)%UNDO_N;
     int i=s->histTop; UndoRec *r=&s->hist[i];
     if(s->odRec==i) s->odRec=-1;
+    if(s->histN>=UNDO_N && r->type!=UR_NONE){   /* full: this overwrites the oldest gesture - retire the rest of it too, so
+                                                 * an Undo can never bring back half a Clear / Rnd All (15 pads of 16) */
+        int og=r->group;
+        for(int k=1;k<UNDO_N;k++){ int j=(i+k)%UNDO_N; UndoRec *q=&s->hist[j];
+            if(q->group!=og||q->type==UR_NONE||q->type==UR_PENDING) break;
+            q->type=UR_NONE; if(s->odRec==j)s->odRec=-1; s->histN--; } }
     r->type=type; r->track=track; r->group=s->histGroup; r->count=0; r->hasSet=0; r->dyn=0;
     s->histTop=(i+1)%UNDO_N; if(s->histN<UNDO_N) s->histN++;
     return r;
@@ -1377,12 +1394,16 @@ static int dyn_sustain_samples(const loopex_t *s){
     if(s->sync){ double bars=floor(pow(64.0,k)+0.5); if(bars<1.0)bars=1.0; return (int)(bars*4.0*60.0*SR/(s->bpm>20.0?s->bpm:120.0)); }   /* SYNC: 1 .. 64 bars */
     return (int)(SR*pow(60.0,k));                                          /* 1 s .. 60 s, log */
 }
+static inline int undo_holds(loopex_t *s, int vi){ int q=atomic_load(&s->undoReq); return q>0 && (vi<0 || s->hist[q-1].track==vi); }
 static void dyn_start(loopex_t *s, int preroll){
+    /* Never while the session worker owns the pads: a load empties them and fills their buffers, a clone
+     * copies into one, a save reads them - a capture would write the same buffer from this thread. */
+    if(atomic_load(&s->sio.request)||atomic_load(&s->sio.busy)||atomic_load(&s->sio.applyState)) return;
     int sel=s->dynBase; if(sel<0||sel>=NUM_VOICES)sel=0;   /* anchored: selecting or tapping pads doesn't move the range */
     int spread=s->dynSpread; if(spread<1)spread=1; if(spread>NUM_VOICES)spread=NUM_VOICES;
     int t=-1, filled=0;
     for(int k=0;k<spread;k++){ int slot=(s->dynCursor+k)%spread; int ci=(sel+slot)%NUM_VOICES; Voice *v=&s->voice[ci];
-        if(v->muted||v->armed||v->state==VS_RECORDING||v->state==VS_OVERDUBBING) continue;
+        if(v->muted||v->armed||v->state==VS_RECORDING||v->state==VS_OVERDUBBING||undo_holds(s,ci)) continue;
         if(v->loopLen>0 && !s->dynOverwrite && !v->dynSpent){ filled=1; continue; }   /* holds a loop: not without permission (a capture whose Sustain ran out is fair game) */
         t=ci; s->dynCursor=slot; break; }
     if(t<0){ if(filled){ s->dynWait=1; s->dynFull=1; } return; }         /* full: park, and let the UI ask */
@@ -1392,7 +1413,7 @@ static void dyn_start(loopex_t *s, int preroll){
     while(s->histN>0){ int ti=(s->histTop-1+UNDO_N)%UNDO_N; UndoRec *tr=&s->hist[ti]; if(!tr->dyn||tr->type==UR_PENDING) break;
         tr->type=UR_NONE; s->histTop=ti; s->histN--; }
     s->histGroup++; s->dynGroup=s->histGroup;
-    { int before=s->histN; loop_clear(s,v); if(s->histN>before) s->hist[(s->histTop-1+UNDO_N)%UNDO_N].dyn=1; }   /* what was there is replaced - and Undo has it */
+    { int before=s->histTop; loop_clear(s,v); if(s->histTop!=before) s->hist[(s->histTop-1+UNDO_N)%UNDO_N].dyn=1; }   /* histTop, not histN: histN stops counting once the ring is full */   /* what was there is replaced - and Undo has it */
     v->state=VS_RECORDING; v->loopLen=0; v->recHead=0; v->disintGen=0; v->dynDie=0; v->dynSpent=0; wear_zero(v);
     if(preroll){ int r=s->dynPreW;                                          /* oldest sample first */
         for(int i=0;i<DYN_PRE;i++){ v->bufferL[i]=s->dynPreL[r]; v->bufferR[i]=s->dynPreR[r]; r++; if(r>=DYN_PRE)r=0; }
@@ -1504,16 +1525,23 @@ static void loop_reset(loopex_t *s, Voice *v){   /* settings back to factory; au
 /* Undo: pop the newest gesture (every record of its group). Audio and settings restore on
  * the callback (a pointer swap / a field copy); an overdub restore is a big copy, so the
  * worker does it and the record is marked PENDING until then. */
+/* An overdub undo is written back by the sio worker, which may be busy (a save, a load) for seconds. Until it
+ * has, nothing may touch that pad's audio: a new overdub, a clear or another Undo would be overwritten by the
+ * old samples when the worker finally runs. */
 static void undo_pop(loopex_t *s){
+    if(undo_holds(s,-1)){ snprintf(s->undoMsg,sizeof s->undoMsg,"undo busy - try again"); return; }
+    while(s->histN>0 && s->hist[(s->histTop-1+UNDO_N)%UNDO_N].type==UR_NONE){ s->histTop=(s->histTop-1+UNDO_N)%UNDO_N; s->histN--; }
     if(s->histN<=0){ snprintf(s->undoMsg,sizeof s->undoMsg,"nothing to undo"); return; }
     int g=s->hist[(s->histTop-1+UNDO_N)%UNDO_N].group, done=0; s->undoMsg[0]=0;
     while(s->histN>0){
-        int i=(s->histTop-1+UNDO_N)%UNDO_N; UndoRec *r=&s->hist[i]; if(r->group!=g) break;
+        int i=(s->histTop-1+UNDO_N)%UNDO_N; UndoRec *r=&s->hist[i];
+        if(r->type==UR_NONE){ s->histTop=i; s->histN--; if(!done&&s->histN>0) g=s->hist[(s->histTop-1+UNDO_N)%UNDO_N].group; continue; }   /* a retired / restored slot is not a gesture */
+        if(r->group!=g) break;
         Voice *v=&s->voice[r->track]; const char *what="";
         switch(r->type){
         case UR_AUDIO:{ int16_t *tL=v->bufferL,*tR=v->bufferR; v->bufferL=r->bufL; v->bufferR=r->bufR; r->bufL=tL; r->bufR=tR;
             v->state=(r->state==VS_RECORDING||r->state==VS_OVERDUBBING)?VS_PLAYING:r->state; v->playPhase=r->playPhase; v->playHead=r->playHead;
-            v->armed=0; v->recHead=0; v->dynDie=0; __atomic_store_n(&v->loopLen,r->len,__ATOMIC_RELEASE); if(r->hasSet) settings_put(v,&r->set); wear_restore(r,v); what="audio"; r->type=UR_NONE; break; }
+            v->armed=0; v->recHead=0; v->dynDie=0; v->dynSpent=0; v->syncPend=0; v->recTarget=0; __atomic_store_n(&v->loopLen,r->len,__ATOMIC_RELEASE); if(r->hasSet) settings_put(v,&r->set); wear_restore(r,v); what="audio"; r->type=UR_NONE; break; }
         case UR_SETTINGS: settings_put(v,&r->set); wear_restore(r,v); what="settings"; r->type=UR_NONE; break;
         case UR_OVERDUB:
             if(v->loopLen==r->len && r->count>0 && !atomic_load(&s->undoReq)){ if(v->state==VS_OVERDUBBING)v->state=VS_PLAYING; if(s->odRec==i)s->odRec=-1;
@@ -1905,7 +1933,9 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
             if(var>0.0) pos-=PRND(ps->gRng)*grid*var*0.5;
             double rate=(PRND(ps->gRng)<var*0.6)?-pm:pm;
             if(rate<0) pos+=grid;                                     /* read backwards from the cell end */
-            { double need=grid*0.95*(rate>0?rate:0.0)+64.0; if((double)ps->w-pos<need) pos=(double)ps->w-need; }   /* stay behind the write head */
+            { double need=grid*0.95*(rate>0?rate:0.0)+64.0, ar=fabs(rate);
+              double maxB=(double)PUNCH_BUF-grid*(0.95+0.475)*ar-256.0; if(maxB<need)maxB=need;   /* and inside the 2 s ring: cell 8 of a 1/4 grid */
+              double bk=(double)ps->w-pos; if(bk<need) pos=(double)ps->w-need; else if(bk>maxB) pos=(double)ps->w-maxB; }   /* stay behind the write head */
             double pan=(ps->gIdx&1)?0.6:-0.6; ps->gIdx++;
             punch_grain(ps,pos,grid*0.95,rate,pan);
             if(ps->gPrime){ ps->gPrime=0; int gi=punch_grain(ps,pos-grid*0.475*rate,grid*0.95,rate,-pan); if(gi>=0)ps->gAge[gi]=grid*0.475; } }
@@ -1934,6 +1964,9 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
                    if(PRND(ps->gRng)<oc) semis+=((double)P[1]>=0.5)?12.0:-12.0; }
             double rate=pow(2.0,semis/12.0);
             double pos=(double)ps->w-ivl*2.0-200.0; if(rate>1.0) pos-=ivl*rate;   /* faster reads need more room */
+            { double tr=ivl*1.6*(rate>1.0?rate:1.0), minB=tr+64.0, maxB=(double)PUNCH_BUF-tr-256.0-ivl*0.8*rate;   /* inside the ring and behind w - */
+              if(maxB<minB)maxB=minB; double bk=(double)ps->w-pos;                                              /* a SYNC 1/4 stroke asked 2 beats back */
+              if(bk>maxB)pos=(double)ps->w-maxB; else if(bk<minB)pos=(double)ps->w-minB; }
             double pan=-0.7+(double)k/3.0*1.4;
             punch_grain(ps,pos,ivl*1.6,rate,pan); ps->gIdx++;
             if(ps->gPrime){ ps->gPrime=0; int gi=punch_grain(ps,pos-ivl*0.8*rate,ivl*1.6,rate,pan); if(gi>=0)ps->gAge[gi]=ivl*0.8; } }
@@ -2020,7 +2053,8 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
         if(d->mech==PM_REPEAT){ static const double RF[4]={1.0,0.5,1.0/3.0,0.25}; elT=ps->sliceLen*RF[press_step(&ps->pStep,press,4)]; }   /* 1 -> 1/2 -> 1/3 -> 1/4 */
         else if(d->mech==PM_REVERSE){ static const double PF[4]={1.0,0.75,0.55,0.4}; double beat=punch_beat();
             elT=rev_el(nv_snap(ps->fullT/beat*PF[press_step(&ps->pStep,press,4)],ps->fullT/beat)*beat); }   /* shorter note values */
-        else if(d->mech==PM_CHOP) elT=ps->sliceLen*(press_step(&ps->pStep,press,2)?0.5:1.0); }
+        else if(d->mech==PM_CHOP) elT=ps->sliceLen*(press_step(&ps->pStep,press,2)?0.5:1.0);
+        if(elT>ps->sliceLen)elT=ps->sliceLen; }   /* never past the frozen slice (a big tempo drop while held) */
     else {         /* ASYNC: continuous - the rate follows the finger */
         if(d->mech==PM_REPEAT)       elT=ps->sliceLen*pow(0.5,press*2.0);   /* 1/1 .. 1/4 */
         else if(d->mech==PM_REVERSE) elT=ps->sliceLen*(1.0-press*0.6);
@@ -2183,7 +2217,7 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
     int effStart=(int)v->winS; if(effStart<0)effStart=0; if(effStart>LEN-1)effStart=LEN-1;
     int avail=LEN-effStart; if(avail<1)avail=1;                        /* End is loop LENGTH from Start */
     /* End is a LENGTH - a fraction of the whole loop, clamped to what is left after Start - so a
-     * window keeps its size while Start slides it through the sample (0.9.2; it used to be a
+     * window keeps its size while Start slides it through the sample (0.9.5; it used to be a
      * fraction of what was left, which shrank the window as Start moved right). */
     int effLen=(int)v->winL; if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;
     int effEnd=effStart+effLen;
@@ -2655,7 +2689,7 @@ static void on_midi(void *inst, const uint8_t *msg, int len, int source) {
 
 /* ---- Input EQ (record chain) ---- */
 static void input_eq_update(loopex_t *s){
-    /* Input EQ (0.9.2): a blend of the Studer 962 presence band (150 Hz-7 kHz, the wider and
+    /* Input EQ (0.9.5): a blend of the Studer 962 presence band (150 Hz-7 kHz, the wider and
      * more musical sweep) and the Tascam 424 MkII/MkIII channel EQ (100 Hz and 10 kHz shelf
      * points, +-12 dB mid - owner's manual p.11/36, spec p.45): 2nd-order shelves +-15 dB
      * with a sweepable low corner (40-400 Hz, default 100 = the 424's point) and a high
@@ -3752,7 +3786,7 @@ static void set_param(void *inst, const char *key, const char *val) {
             p=(*eol)?eol+1:eol;
         }
         /* A 0.9.1 state (no LowF knob yet): its LoCut and high-shelf corner were LINEAR sweeps and its low
-         * shelf sat at 120 Hz. Translate them onto 0.9.2's log knobs so an old set or session sounds the same. */
+         * shelf sat at 120 Hz. Translate them onto 0.9.5's log knobs so an old set or session sounds the same. */
         if(!strstr(val,"inLowFreq=")){ char b[32];
             if(strstr(val,"tapeLoCut=")&&s->tapeLoCut>0.01f){ snprintf(b,sizeof b,"%.5f",log((20.0+(double)s->tapeLoCut*780.0)/20.0)/log(40.0)); set_param(inst,"tapeLoCut",b); }
             if(strstr(val,"inHighFreq=")){ snprintf(b,sizeof b,"%.5f",log((3000.0+(double)s->inHighFreq*12000.0)/3000.0)/log(5.0)); set_param(inst,"inHighFreq",b); }
@@ -3763,6 +3797,8 @@ static void set_param(void *inst, const char *key, const char *val) {
     }
     if(strcmp(key,"cmd")==0){
         const char *c=strchr(val,':'); int vi=c?atoi(c+1):-1;
+        if(atomic_load(&s->sio.status)==2 && (atomic_load(&s->sio.busy)||atomic_load(&s->sio.request)) && strncmp(val,"sel",3)!=0 && strncmp(val,"mute",4)!=0) return;   /* loading: pads are being filled, no tap / dub / arm / clear / undo */
+        if((strncmp(val,"odub",4)==0||strncmp(val,"clear",5)==0||strncmp(val,"arm",3)==0) && vi>=0 && undo_holds(s,vi)) return;   /* its overdub undo is still being written back */
         if(strncmp(val,"tap",3)==0)        voice_tap(s,vi);
         else if(strncmp(val,"odub",4)==0)  voice_odub(s,vi);
         else if(strncmp(val,"clear",5)==0){ if(vi>=0&&vi<NUM_VOICES){ s->histGroup++; loop_clear(s,&s->voice[vi]); } }
@@ -3789,7 +3825,10 @@ static void set_param(void *inst, const char *key, const char *val) {
         if(strncmp(val,"save",4)==0){
             get_param(s,"state",s->sio.stateBuf,(int)sizeof(s->sio.stateBuf));  /* snapshot settings */
             atomic_store(&s->sio.request,1);
-        } else if(strncmp(val,"load",4)==0) atomic_store(&s->sio.request,2);
+        } else if(strncmp(val,"load",4)==0){   /* from here the worker owns the pads: nothing on this thread may write them */
+            s->dynOverwrite=0; if(s->dynMode!=0) set_param(s,"dynMode","Off");
+            if(!atomic_load(&s->undoReq)){ s->histN=0; s->odRec=-1; }   /* no Undo swapping a buffer the loader is filling */
+            atomic_store(&s->sio.request,2); }
         else if(strncmp(val,"delete",6)==0) atomic_store(&s->sio.request,5);
         return; }
     if(strcmp(key,"punch")==0){ const char *c=strchr(val,':'); int n=c?atoi(c+1):-1;
@@ -3946,7 +3985,7 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"selTrack")==0){s->selTrack=(int)lb_clampf((float)atof(val),1.0f,16.0f);return;}
     if(strcmp(key,"clearSel")==0){float t=(float)atof(val);if(t>0.5f){int ci=s->selTrack-1;
         if(ci>=0&&ci<NUM_VOICES)voice_clear(&s->voice[ci]);}return;}
-    if(strcmp(key,"clearAll")==0){float t=(float)atof(val);if(t>0.5f){ s->histGroup++;   /* Sessions > Clear: audio AND every loop setting, one undo group */
+    if(strcmp(key,"clearAll")==0){float t=(float)atof(val);if(t>0.5f && !undo_holds(s,-1)){ s->histGroup++;   /* Sessions > Clear: audio AND every loop setting, one undo group */
         for(int ci=0;ci<NUM_VOICES;ci++){ Voice *v=&s->voice[ci]; undo_audio_set(s,v); voice_clear(v); voice_defaults(v); }}return;}
     if(strcmp(key,"rndSel")==0){ if(atof(val)>0.5){ int ci=s->selTrack-1; if(ci>=0&&ci<NUM_VOICES){ s->histGroup++; undo_settings(s,&s->voice[ci]); voice_randomize(&s->voice[ci],1.0); } } return; }   /* Dynamic > Rnd Pad */
     if(strcmp(key,"rndAll")==0){ if(atof(val)>0.5){ s->histGroup++; for(int ci=0;ci<NUM_VOICES;ci++){ undo_settings(s,&s->voice[ci]); voice_randomize(&s->voice[ci],1.0); } } return; }   /* Dynamic > Rnd All */

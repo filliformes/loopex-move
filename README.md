@@ -13,7 +13,7 @@ and a MIDI-keyboard polyphony layer.
 > from the norns looper world (*wrms*, *cranes*, *oooooo*, *samsara*, *nydl*, *otis*).
 
 - **Module:** `loopex` · **Name:** Loopex · **Type:** Overtake (Schwung) · **API v2**
-- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.2 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
+- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.5 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
 
 ---
 
@@ -224,7 +224,7 @@ it keeps Move's tempo on its own grid.
 `slot_YYYYMMDD_HHMM`; saving over a used slot asks for confirmation. Settings *and*
 recorded audio are stored — the audio as plain **16-bit stereo WAV** files (`sessionNN/sNN_loopNN.wav`, one per
 loop) that you can copy straight off the Move — the folder shows up in the Schwung Manager's file
-browser (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`); sessions from before 0.9.2
+browser (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`); sessions from before 0.9.5
 are moved there and still load.
 **Clear** (K5 on the Sessions page) wipes all sixteen loops *and* resets every loop's settings after
 a confirmation (the global pages — Output, Input, Drift… — are untouched); **Reset** (K6) returns every *setting* of the selected loop to factory defaults — the audio

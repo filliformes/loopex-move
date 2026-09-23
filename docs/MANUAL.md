@@ -1,6 +1,6 @@
 # Loopex Manual
 
-*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.2*
+*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.5*
 
 This is the full reference. The [README](../README.md) is the short tour.
 
@@ -265,7 +265,7 @@ it keeps Move's tempo on its own grid.
 
 Sixty-four slots. **Slot** browses (one slot per four detents), **Save** writes, **Load** reads, **Del** (K4) erases the slot, **Clear** (K5) wipes all sixteen loops and resets every loop's settings to factory — after a confirmation. The global pages (Input, Output, Perform, Drift, Sends) are left as they are: it is the loops, not the rig. **Reset** (K6) takes every *setting* of the selected loop back to factory — speed, filter, EQ, sends, playheads, HeadMix, all of it — after a confirmation. The audio stays and keeps playing from where it was; hold the pad if you want that cleared too. **Reset All** (K7) does the same for all sixteen pads at once. Saving over a used slot, or deleting one, asks first (K8 = yes, K5 = no, Back cancels). Each slot is named by date and time (`Sep 14 21:30` in the footer); the header shows which session is loaded, or **New**. A successful save shows a burst.
 
-A session holds every setting, the punch pad values, the FX-sequencer pattern and all recorded audio. The audio is stored as plain **16-bit stereo 44.1 kHz WAV** files — `sessionNN/sNN_loop01.wav` … `sNN_loop16.wav`, one per loop — so you can copy them off the Move (`scp ableton@move.local:/data/UserData/UserLibrary/Loopex/session03/*.wav .`) and use them anywhere — or browse them in the Schwung Manager (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`). Sessions saved before 0.9.2 are moved there on first launch and still load. Disk work runs on a worker thread pinned to cores 0–2, never on the audio callback. Files live in `/data/UserData/UserLibrary/Loopex/` and survive reinstalls.
+A session holds every setting, the punch pad values, the FX-sequencer pattern and all recorded audio. The audio is stored as plain **16-bit stereo 44.1 kHz WAV** files — `sessionNN/sNN_loop01.wav` … `sNN_loop16.wav`, one per loop — so you can copy them off the Move (`scp ableton@move.local:/data/UserData/UserLibrary/Loopex/session03/*.wav .`) and use them anywhere — or browse them in the Schwung Manager (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`). Sessions saved before 0.9.5 are moved there on first launch and still load. Disk work runs on a worker thread pinned to cores 0–2, never on the audio callback. Files live in `/data/UserData/UserLibrary/Loopex/` and survive reinstalls.
 
 ---
 

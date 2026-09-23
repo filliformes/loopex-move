@@ -169,7 +169,7 @@ const PFX_NAMES = ['Off','Drive','Sweeten','Fuzz','Howl','Fold','Swell','Doubler
 const PREAMP_NAMES = ['Tapeless','Clean','Cass1','Cass2','VHS1','VHS2','Reel15','Reel7','Reel3','4trk','Porta','Dub','Warp'];
 const MEQ_NAMES = ['Off','962','Air','SSL','Neve','Trident','Studer','API','Ampex','MPC','S950','SP12','Emu'];
 const MENU_DEFS = [
-    [ /* Track 1 — Input: p1 Input Tape (the machine), p2 Input EQ (0.9.2: Input FX + Input Tape merged) */
+    [ /* Track 1 — Input: p1 Input Tape (the machine), p2 Input EQ (0.9.5: Input FX + Input Tape merged) */
       { k:'inputMonitor', lo:0, hi:1, lbl:'Mon' },    { k:'preamp', opts:PREAMP_NAMES, lbl:'Tape' },
       { k:'inputGain', lo:0, hi:2, lbl:'Trim' },      { k:'tapeDrive', lo:0, hi:1, lbl:'Drive' },
       { k:'tapeWow', lo:0, hi:1, lbl:'Wow' },         { k:'tapeFlut', lo:0, hi:1, lbl:'Flut' },
@@ -438,7 +438,7 @@ const PAGE2 = [   /* Loop page 3 / Tone (Right arrow) — Studer EQ + DJ reso + 
     { k: 'v_eqBass', lo: -1, hi: 1, lbl: 'Bass' },    { k: 'v_eqPresFrq', lo: 0, hi: 1, lbl: 'MidF' },
     { k: 'v_eqPresAmt', lo: -1, hi: 1, lbl: 'MidG' }, { k: 'v_eqTreble', lo: -1, hi: 1, lbl: 'Treb' },
     { k: 'v_tilt', lo: -1, hi: 1, lbl: 'Tilt' },      { k: 'v_atk', lo: 0, hi: 1, lbl: 'Atk' },
-    { k: 'v_rel', lo: 0, hi: 1, lbl: 'Dec' },         { k: 'v_wear', lo: 0, hi: 1, lbl: 'Wear' },   /* Tape Wear (0.9.2) replaces the Heads shortcut */
+    { k: 'v_rel', lo: 0, hi: 1, lbl: 'Dec' },         { k: 'v_wear', lo: 0, hi: 1, lbl: 'Wear' },   /* Tape Wear (0.9.5) replaces the Heads shortcut */
 ];
 const HEAD_MODES = ['Off', 'Fwd', 'Bwd', 'Ping', 'Jump'];
 const PAGE3 = [   /* Loop page 4 — Playheads: mode + speed per head (touch one, jog moves it) */
@@ -1678,7 +1678,7 @@ globalThis.onMidiMessageInternal = function (data) {
             if (shiftHeld && undoHeld) {                  /* Shift+Undo+pad = this loop's settings back to factory (audio stays) */
                 mutePressed[i] = true; undoUsed = true; spCmd('reset:' + i); needReload = true; setMsg('T' + (i + 1) + ' reset'); return; }
             if (shiftHeld) { mutePressed[i] = true; cycleSpeed(i); return; }   /* Shift+tap = cycle speed (not a clear-hold) */
-            if (undoHeld) {   /* Undo+pad overdub retired in 0.9.2 (overdub is the step hold): the combo does nothing,
+            if (undoHeld) {   /* Undo+pad overdub retired in 0.9.5 (overdub is the step hold): the combo does nothing,
                                * so it can't tap the pad AND fire an Undo on release */
                 mutePressed[i] = true; undoUsed = true; setMsg('overdub: hold step ' + (i + 1)); dirty = true; return; }
             if (false) {

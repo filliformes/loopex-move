@@ -511,6 +511,12 @@ license (see `overtake-shell/vendor/` and the file headers); the rest is inspira
   equaliser) in the 1.960.221 input unit. Bass and Treble corners and slopes are a least-squares
   fit to the response curves printed in the service manual (§1.7.2 / D 3/3), digitised off the
   plot; Mid follows the published Q = 1, 150 Hz–7 kHz, ±11 dB presence spec.
+- **Tascam 424 MkII / MkIII Portastudio** — the other half of the Input EQ: its ±15 dB shelves with the
+  sweepable 100 Hz low corner and the 10 kHz high shelf, taken from the owner's manual and blended with
+  the Studer 962 presence band.
+- **William Basinski, *The Disintegration Loops*** — Tape Wear: ageing tape loops shedding oxide on
+  every pass over the head, so the music breaks into the same holes lap after lap.
+  https://en.wikipedia.org/wiki/The_Disintegration_Loops
 - **Soma Laboratory COSMOS** — the Drift memory: prime-length shifting delay lines that recombine
   endlessly into an ever-evolving ambient layer. https://somasynths.com/cosmos/
 - **norns loopers** — wrms, concrète, cranes, oooooo, otis, reels, ndls, samsara, mlre, nydl,

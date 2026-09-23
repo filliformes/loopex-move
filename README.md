@@ -164,7 +164,9 @@ pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Co
 | **Sustn** | how long a capture plays before it pauses itself (its Release fades it) and its pad is free for the next capture: 1 → 60 s (SYNC: 1 → 64 bars), top = forever |
 | **RndPad · RndAll** | randomise every loop-page parameter of the selected pad / of all sixteen, no confirmation |
 
-A 100 ms pre-roll means a capture keeps the transient that triggered it. **Randomise** is musical by rule: Speed and Pitch move only as *complementary musical intervals* (the heard
+A 100 ms pre-roll means a capture keeps the transient that triggered it. On screen Sense reads in dB, Error in %,
+and Sustn in seconds (bars in SYNC) or `never`. Dynamic is saved with the set; loading a session brings back its
+Dynamic knobs but always leaves the sampler off. **Randomise** is musical by rule: Speed and Pitch move only as *complementary musical intervals* (the heard
 transposition and the tempo ratio are both octaves, fifths or major/minor thirds — never more than two
 octaves — and 30 % of the time nothing moves),
 playhead speeds are never touched, heads 2–4 are switched on or off and only an active one gets a

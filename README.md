@@ -59,6 +59,9 @@ Navigate with **Down** (next) and **Up** (previous).
   *is* the seed: every position is a different reproducible mangle, click-free.
 - **Scatter** — stochastic slice jumps, crossfaded.
 - **DJ Filter + Reso** — continuous LP/HP sweep with resonance, smoothed over ~10 ms.
+- **Start / End** — the loop window. **End is a length** (a fraction of the whole recording, clamped to
+  what's left after Start), so a short window keeps its size while Start slides it through the sample.
+  Both are fine and velocity-sensitive: 2 ms per detent when turned slowly.
 - **Attack / Decay** — per-loop amplitude envelope (3 ms → 3 s / 5 s), used on trigger,
   mute, pause and stop.
 - **Wear** (Tape Wear) — the loop wears out like the ageing tape loops of William Basinski's
@@ -68,7 +71,7 @@ Navigate with **Down** (next) and **Up** (previous).
   the melody fragments into the same holes lap after lap. It is truly stereo: each track has its own
   damage (mostly shared, partly its own, the edge track wearing a little faster), so a hole often
   opens on one side first and the image wanders as the loop dies. More active playheads wear it faster.
-  Turn it to 0 and the tape stops wearing but stays damaged; **Reset** heals it. The recording
+  Turn it to 0 and the tape stops wearing but stays damaged; **Shift + Undo + pad** (or Sessions → Reset) gives you clean tape again, recording kept, and Undo brings the damage back. The recording
   itself (and the saved WAV) is never touched, and the damage is saved with the session. At the
   top an 8-second loop collapses in about a minute, in the middle in about twenty.
 
@@ -153,17 +156,17 @@ pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Co
 
 | Knob | |
 |---|---|
-| **Dyn** | Off · **Level** (a sound above the threshold) · **Onset** (a transient, however loud the sustain under it; the next hit ends one capture and starts the next) · **Phrase** (starts on sound, stops at the next gap) · **Clock** (every Size, on Move's tempo) |
+| **Dyn** | Off · **Level** (a sound above the threshold) · **Onset** (a transient, however loud the sustain under it; the next hit ends one capture and starts the next) · **Phrase** (a sentence: starts on sound, ends at a gap of 400 ms or more, at least 1 s long) · **Clock** (every Size on Move's clock — on the beat, on the bar once Move has pressed Play; Free = 1 bar) |
 | **Sense** | the mode's threshold, −60 → −6 dBFS |
 | **Size** | 1/16 … 8 bars at Move's tempo, or **Free** — record until 200 ms of quiet (default) |
-| **Spread** | 1–16 pads from the selected one (default 16) |
+| **Spread** | 1–16 pads from the pad selected when Dynamic was switched on (default 16); selecting pads afterwards doesn't move it |
 | **Error** | how much of each new capture is randomised — 0 faithful, 1 a new creature every time |
-| **Sustn** | how long a capture plays before it pauses itself (its own Decay fades it): 1 → 60 s, top = forever |
+| **Sustn** | how long a capture plays before it pauses itself (its Release fades it) and its pad is free for the next capture: 1 → 60 s (SYNC: 1 → 64 bars), top = forever |
 | **RndPad · RndAll** | randomise every loop-page parameter of the selected pad / of all sixteen, no confirmation |
 
 A 100 ms pre-roll means a capture keeps the transient that triggered it. **Randomise** is musical by rule: Speed and Pitch move only as *complementary musical intervals* (the heard
 transposition and the tempo ratio are both octaves, fifths or major/minor thirds — never more than two
-octaves — and a third of the time nothing moves),
+octaves — and 30 % of the time nothing moves),
 playhead speeds are never touched, heads 2–4 are switched on or off and only an active one gets a
 random pan, the loop's Volume is left alone, the Start/End window never drops below half the loop, and sends, Comp and Sat
 never go past 60 %.
@@ -183,6 +186,38 @@ high feedback sustains without runaway.
 - **FBk** is capped below unity, so the tail always fades: up to a few minutes at maximum. Leave everything
   paused and a **silence bleed** clears an abandoned tail after about eight seconds with no input.
 - Drift and Mix start at zero (silent until dialled in); ~1.7 MB of memory; saves with the session.
+
+### ASYNC / SYNC (Sessions page, K8)
+Loopex is an **asynchronous** looper by default: loops are exactly as long as you play them and nothing
+waits for a beat. Switch **Mode** to **SYNC** and it locks to Move's bars and beats (4/4 bars, triplet
+ratios included). Switching is always silent: nothing that is playing jumps, values are only put on
+the grid the next time you turn them, and anything waiting for a beat starts at once if you switch back.
+
+| | ASYNC | SYNC |
+|---|---|---|
+| Tap to record | starts now | starts on the **next beat** (a tap up to 1/8 beat late still catches the beat) |
+| Tap to close | exactly what you played | **whole bars** (under ¾ bar: whole beats) — it records on to the bar line, or trims |
+| Threshold arm | starts when the input crosses | starts on the beat after it crosses |
+| Un-pause | from Start, now | from Start, **on the next bar** (the pad blinks while it waits) |
+| Move presses Play | — | every playing loop restarts on bar 1 |
+| Tempo change | loops ignore it | loops **follow the tempo tape-style** (speed and pitch together), from the tempo they were recorded at |
+| Speed / head speeds | 0.1-semitone steps | **¼× ½× ⅔× 1× 3/2× 2× 4×** |
+| Start | fine, 2 ms per detent | **1/16** steps |
+| End (length) | fine | **1/16 · 1/8T · 1/8 · 1/4T · 1/4 · 1/2T · 1/2 · 1, 2, 4, 8 bars** · all |
+| Jump heads / Scatter | free | leap on 1/16s, to 1/16 positions / slices on 1/16s |
+| Dynamic Size | default Free | its own value, default **1 bar**; Free = until quiet, rounded to bars and brought in on the bar |
+| Dynamic Sustain | 1–60 s | **1–64 bars** |
+| Stumble step | 20–1000 ms | 1/32 … 1 bar, on the grid |
+| Drift Rate | free | 8 bars … 1/16 per cycle |
+| FX sequencer / Pump | follow the tempo | locked to the bar |
+| Punch Loops, Chop, Reverse, Glide | repeat from the moment you hit them | live audio until the **next grid line**, then the bit that just played repeats on the grid; Rate / Len in **note values** (triplets included) |
+| Punch pressure | continuous: the rate follows your finger, releases bloom out | **steps on the grid**: Loops 1 → ½ → ⅓ → ¼, Reverse and Strum through shorter note values, Chop and Mosaic ×2 — a new step takes over on a full slice line |
+| Mosaic / Strum | free-running | grains fire **on the grid lines**; Strum's Rate in note values |
+| Punch LFO Rate | 0.05–20 Hz | **8 bars … 1/32**, triplets included, **locked to the bar** |
+| Screen | seconds | **bars.beats**, with beat and bar lines on the waveform |
+
+SYNC keeps time from Move's MIDI clock: Start or Song Position gives it the bar. Without a running clock
+it keeps Move's tempo on its own grid.
 
 ### Sessions
 **64 numbered slots**, saved and loaded from the **≡ (Menu)** button, each named
@@ -253,9 +288,11 @@ per-loop pitch shifters the same way (even and odd loops). Sessions live in
   at the end of the master chain keeps it saturating instead of diverging, and InGain is the control.
   If the host cannot provide a stem (they need host **1.4** with `link_audio_publish` on), Loopex records
   Line instead and says so on screen while Settings is open.
-- **Undo** walks back a **16-level history** (32 records; a gesture on all sixteen pads is one level): overdubs (every overwritten sample is saved as it goes),
+- **Undo** walks back **32 steps** (a gesture on all sixteen pads comes back in one press but uses 16 of them): overdubs (every overwritten sample is saved as it goes),
   clears, arms, Dynamic overwrites, randomise, reset — newest gesture first; a gesture that touched
-  several pads (Rnd All, Clear) comes back in one press. Audio undo swaps buffers, so it is instant.
+  several pads (Rnd All, Clear) comes back in one press. Clears and overwrites swap buffers, so they come back
+  instantly. Knob moves and a first recording onto an empty pad are not undoable; loading a session starts a
+  fresh history.
 
 ### LaunchControl XL (external MIDI)
 A Novation LaunchControl XL can drive all sixteen loops. Set **MIDI** (Settings p1) to **`Ctrl`** to
@@ -301,7 +338,7 @@ channel-1 pads.
 | **Sample/Record** | Drift menu · **Shift + Sample** = threshold-arm (pad blinks red) · **+ jog** sets the threshold |
 | **≡ (Menu)** | Sessions menu |
 | **Mute / Copy / Loop** (held) | modifiers — lit while held |
-| **Undo** | step back through the last 16 gestures: overdub, clear, Dynamic overwrite, randomise, reset |
+| **Undo** | step back up to 32 steps: overdub, clear, Dynamic overwrite, randomise, reset |
 | **Back** | close a menu, then exit |
 | **Full exit** | **Shift + Volume + Jog-click** (a plain Back only *suspends*) |
 

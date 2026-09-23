@@ -147,6 +147,7 @@
   <a href="#perform">Perform &amp; master</a>
   <a href="#lcxl">External MIDI</a>
   <a href="#drift">Drift</a>
+  <a href="#sync">ASYNC / SYNC</a>
   <a href="#sessions">Sessions</a>
   <a href="#cheat">Cheat sheet</a>
   <a href="#credits">Credits</a>
@@ -273,15 +274,15 @@
 <section id="dynamic">
   <div class="eyebrow">Dynamic</div>
   <h2>The input plays the sampler</h2>
-  <p class="lede">On the <b>Capture</b> button. Set <b>Dyn</b> to a mode &mdash; or <b>hold Capture</b> to toggle it; the button blinks while it listens &mdash; and every phrase you play is captured into a pad by itself. A capture is an ordinary recording: it gets the tape stage, the loop pages, the sends, and its pad goes red then green like any take. What was on the pad is <em>replaced</em>, never stacked (Chase Bliss Onward); <b>Spread</b> is how many pads the sampler rotates through from the selected one &mdash; 1 replaces the same pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Continua&rsquo;s <em>dimension</em>, with sixteen layers). Muted pads are skipped, and a pad that already holds a loop is never overwritten until you say so: when the range is full it asks <code>CONTINUE DYNAMIC LOOPING AND OVERWRITE PADS?</code> over whatever view is showing &mdash; K6 yes, K5 or Back turns Dynamic off.</p>
+  <p class="lede">On the <b>Capture</b> button. Set <b>Dyn</b> to a mode &mdash; or <b>hold Capture</b> to toggle it; the button blinks while it listens &mdash; and every phrase you play is captured into a pad by itself. A capture is an ordinary recording: it gets the tape stage, the loop pages, the sends, and its pad goes red then green like any take. What was on the pad is <em>replaced</em>, never stacked (Chase Bliss Onward); <b>Spread</b> is how many pads the sampler rotates through from the selected one &mdash; 1 replaces the same pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Continua&rsquo;s <em>dimension</em>, with sixteen layers). Muted pads are skipped, and a pad that already holds a loop is never overwritten until you say so: when the range is full it asks <code>CONTINUE DYNAMIC LOOPING AND OVERWRITE PADS?</code> over whatever view is showing &mdash; K6 or K8 yes; K5, Back or opening another menu turns Dynamic off.</p>
   <div class="scroll"><table class="thin">
     <tr><th>Knob</th><th>What it does</th></tr>
-    <tr><td>Dyn</td><td>Off &middot; <b>Level</b> (a sound above the threshold) &middot; <b>Onset</b> (a transient, however loud the sustain under it) &middot; <b>Phrase</b> (starts on sound, stops at the next gap) &middot; <b>Clock</b> (every Size, on Move&rsquo;s tempo)</td></tr>
+    <tr><td>Dyn</td><td>Off &middot; <b>Level</b> (a sound above the threshold) &middot; <b>Onset</b> (a transient, however loud the sustain under it) &middot; <b>Phrase</b> (a sentence: ends at a gap of 400&nbsp;ms or more, at least 1&nbsp;s long) &middot; <b>Clock</b> (every Size on Move&rsquo;s clock &mdash; on the beat, on the bar once Move has pressed Play; Free = 1 bar)</td></tr>
     <tr><td>Sense</td><td>the mode&rsquo;s threshold, &minus;60 &rarr; &minus;6 dBFS</td></tr>
     <tr><td>Size</td><td>1/16 &hellip; 8 bars at Move&rsquo;s tempo, or <b>Free</b>: record until 200&nbsp;ms of quiet (default)</td></tr>
     <tr><td>Spread</td><td>1&ndash;16 pads from the selected one (default 16)</td></tr>
     <tr><td>Error</td><td>how much of each new capture is randomised &mdash; 0 faithful, 1 a new creature every time</td></tr>
-    <tr><td>Sustain</td><td>how long a capture plays before it pauses itself and its Decay fades it: 1 &rarr; 60&nbsp;s, top = forever</td></tr>
+    <tr><td>Sustain</td><td>how long a capture plays before it pauses itself and its Release fades it, freeing its pad for the next capture: 1 &rarr; 60&nbsp;s (SYNC: 1 &rarr; 64 bars), top = forever</td></tr>
     <tr><td>Rnd Pad &middot; Rnd All</td><td>randomise every loop-page parameter of the selected pad / of all sixteen, no confirmation, by musical rules: Speed and Pitch move only as complementary intervals (the heard transposition and the tempo ratio are both octaves, fifths or major/minor thirds, within two octaves); playhead speeds are never touched; heads 2&ndash;4 switch on or off and only an active one gets a random pan; Volume is left alone; sends, Comp and Sat stay under 60&nbsp;%</td></tr>
   </table></div>
   <p class="muted">A 100&nbsp;ms pre-roll means a capture keeps the transient that triggered it. Pitch- and novelty-triggered modes are on the way.</p>
@@ -306,7 +307,7 @@
   <div class="grid g3">
     <div class="card"><h3>Seed</h3><p>A seeded re-order of the loop's slices (2/4/8/16, some reversed). The knob <em>is</em> the seed: every position is a different, repeatable mangle. Click-free.</p></div>
     <div class="card"><h3>Scatter</h3><p>Stochastic slice jumps with crossfades: from gentle stutter to full shuffle.</p></div>
-    <div class="card"><h3>Tape Wear</h3><p>The loop wears out like Basinski&rsquo;s <em>Disintegration Loops</em>: every pass of a playhead flakes a little oxide off that spot, treble first, then level, until it drops out &mdash; the damage grows where it started and speeds up at the end. Each track has its own damage, so a hole often opens on one side first and the image wanders as the loop dies. The knob is the rate; 0 freezes the damage, Reset heals it. The recording itself is never touched.</p></div>
+    <div class="card"><h3>Tape Wear</h3><p>The loop wears out like Basinski&rsquo;s <em>Disintegration Loops</em>: every pass of a playhead flakes a little oxide off that spot, treble first, then level, until it drops out &mdash; the damage grows where it started and speeds up at the end. Each track has its own damage, so a hole often opens on one side first and the image wanders as the loop dies. The knob is the rate; 0 freezes the damage, Shift + Undo + pad (or Sessions &rarr; Reset) gives you clean tape again. The recording itself is never touched.</p></div>
     <div class="card"><h3>Filter + Reso</h3><p>A DJ-style filter: low-pass left of centre, high-pass right, with resonance. Smoothed, so sweeps never step.</p></div>
     <div class="card"><h3>Studer EQ</h3><p>The 961/962 channel EQ, a <em>F&auml;cherentzerrer</em> (fan equaliser): every setting crosses 0&nbsp;dB at a ~1&nbsp;kHz pivot and slopes continuously outward, with no shelf plateau in the band. Bass reaches &plusmn;15&nbsp;dB at 20&nbsp;Hz, Treble &plusmn;15&nbsp;dB at 20&nbsp;kHz. Corners and slopes are fitted to the curves printed in Studer’s service manual.</p></div>
     <div class="card"><h3>Presence</h3><p>The console’s Pr&auml;senz/Absenz band: a &plusmn;11&nbsp;dB peak at Q&nbsp;=&nbsp;1, sweepable 150&nbsp;Hz&ndash;7&nbsp;kHz, to the published spec. <b>Tilt</b> sits alongside it and tips the whole spectrum about 800&nbsp;Hz.</p></div>
@@ -430,6 +431,36 @@
   </div>
 </section>
 
+<section id="sync">
+  <div class="eyebrow">ASYNC / SYNC</div>
+  <h2>Free, or locked to the bar</h2>
+  <p class="lede">Loopex is an asynchronous looper by default: loops are exactly as long as you play them. Set <b>Mode</b> (Sessions page, K8) to <b>SYNC</b> and it locks to Move&rsquo;s bars and beats &mdash; 4/4 bars, triplet ratios included. Switching is always silent: nothing that is playing jumps, and values are only put on the grid the next time you turn them.</p>
+  <div class="scroll"><table class="thin">
+    <tr><th></th><th>ASYNC</th><th>SYNC</th></tr>
+    <tr><td>Tap to record</td><td>starts now</td><td>starts on the next beat (a tap up to 1/8 beat late still catches the beat)</td></tr>
+    <tr><td>Tap to close</td><td>exactly what you played</td><td>whole bars (under ¾ bar: whole beats) — it records on to the bar line, or trims</td></tr>
+    <tr><td>Threshold arm</td><td>starts when the input crosses</td><td>starts on the beat after it crosses</td></tr>
+    <tr><td>Un-pause</td><td>from Start, now</td><td>from Start, on the next bar (the pad blinks while it waits)</td></tr>
+    <tr><td>Move presses Play</td><td>—</td><td>every playing loop restarts on bar 1</td></tr>
+    <tr><td>Tempo change</td><td>loops ignore it</td><td>loops follow the tempo tape-style (speed and pitch together), from the tempo they were recorded at</td></tr>
+    <tr><td>Speed / head speeds</td><td>0.1-semitone steps</td><td>¼× ½× ⅔× 1× 3/2× 2× 4×</td></tr>
+    <tr><td>Start</td><td>fine, 2 ms per detent</td><td>1/16 steps</td></tr>
+    <tr><td>End (length)</td><td>fine</td><td>1/16 · 1/8T · 1/8 · 1/4T · 1/4 · 1/2T · 1/2 · 1, 2, 4, 8 bars · all</td></tr>
+    <tr><td>Jump heads / Scatter</td><td>free</td><td>leap on 1/16s, to 1/16 positions / slices on 1/16s</td></tr>
+    <tr><td>Dynamic Size</td><td>default Free</td><td>its own value, default 1 bar; Free = until quiet, rounded to bars and brought in on the bar</td></tr>
+    <tr><td>Dynamic Sustain</td><td>1–60 s</td><td>1–64 bars</td></tr>
+    <tr><td>Stumble step</td><td>20–1000 ms</td><td>1/32 … 1 bar, on the grid</td></tr>
+    <tr><td>Drift Rate</td><td>free</td><td>8 bars … 1/16 per cycle</td></tr>
+    <tr><td>FX sequencer / Pump</td><td>follow the tempo</td><td>locked to the bar</td></tr>
+    <tr><td>Punch Loops, Chop, Reverse, Glide</td><td>repeat from the moment you hit them</td><td>live audio until the next grid line, then the bit that just played repeats on the grid; Rate / Len in note values (triplets included)</td></tr>
+    <tr><td>Punch pressure</td><td>continuous: the rate follows your finger, releases bloom out</td><td>steps on the grid: Loops 1 &rarr; &frac12; &rarr; &#8531; &rarr; &frac14;, Reverse and Strum through shorter note values, Chop and Mosaic &times;2 &mdash; a new step takes over on a full slice line</td></tr>
+    <tr><td>Mosaic / Strum</td><td>free-running</td><td>grains fire on the grid lines; Strum&rsquo;s Rate in note values</td></tr>
+    <tr><td>Punch LFO Rate</td><td>0.05&ndash;20 Hz</td><td>8 bars &hellip; 1/32, triplets included, locked to the bar</td></tr>
+    <tr><td>Screen</td><td>seconds</td><td>bars.beats, with beat and bar lines on the waveform</td></tr>
+  </table></div>
+  <p class="muted">SYNC keeps time from Move&rsquo;s MIDI clock (Start or Song Position gives it the bar); without a running clock it keeps Move&rsquo;s tempo on its own grid.</p>
+</section>
+
 <section id="sessions">
   <div class="eyebrow">Sessions</div>
   <h2>Save the whole rig</h2>
@@ -466,7 +497,7 @@
     <tr><td>Menu (≡)</td><td>Sessions menu</td></tr>
     <tr><td>✕ (Delete)</td><td>tap: run / stop the FX sequencer · hold: pattern view + FX Seq page</td></tr>
     <tr><td>◀ / ▶</td><td>tape brake / wind (held)</td></tr>
-    <tr><td>Undo</td><td>step back through the last 16 gestures: overdub, clear, Dynamic overwrite, randomise, reset</td></tr>
+    <tr><td>Undo</td><td>step back up to 32 steps: overdub, clear, Dynamic overwrite, randomise, reset</td></tr>
     <tr><td>Back / Shift+Back</td><td>close menu, then suspend / full exit</td></tr>
   </table></div>
 </section>

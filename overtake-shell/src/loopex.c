@@ -41,6 +41,8 @@
 #include <stdatomic.h>
 #include <sched.h>
 #include <unistd.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -60,9 +62,11 @@ static inline uint64_t lb_cyc(void){ return 0; }
 static inline uint64_t lb_cycfrq(void){ return 1; }
 #endif
 /* Pitch-shifter worker queue: PS_NQ blocks per loop, results collected PS_D blocks after
- * submission (11.6 ms of deadline for a SCHED_OTHER thread on cores 0-2). */
-#define PS_NQ 16
-#define PS_D  4
+ * submission (23 ms of deadline for a SCHED_OTHER thread on cores 0-2). At 4 blocks (11.6 ms)
+ * 12 pitched loops profiled ~1 late block per loop per second - each one a short ride to dry.
+ * The extra latency is invisible: the playheads are nudged forward by it on engage. */
+#define PS_NQ 24
+#define PS_D  8
 #define DYN_PRE 4410   /* dynamic sampler pre-roll, 100 ms */
 #define PROF_N 10
 static const char *PROF_NAME[PROF_N]={"prep","input","record","voices","punch+drift","master","sendA","sendB","pitchsh","palpunch"};
@@ -376,6 +380,7 @@ typedef struct { int mode; float spd, spdCache; double mult, phase, env; int dir
 typedef enum { OD_REPLACE=0, OD_MULTIPLY=1, OD_DISINTEGRATION=2 } OverdubMode;
 typedef enum { VS_EMPTY=0, VS_RECORDING, VS_PLAYING, VS_PAUSED, VS_OVERDUBBING } VoiceState;
 #define UNDO_N 32   /* records; a gesture on all 16 pads is one group of 16, so two of those fit. Only address space until a loop records into a slot's buffer. */
+#define XF_N 256        /* jump declick crossfade, samples (5.8 ms); was 64 (1.45 ms), which ticked on bass */
 #define WEAR_CELL 256                          /* Tape Wear map: one cell per ~5.8 ms of tape, whatever the loop length */
 #define WEAR_MAX  (44100*LOOP_SECONDS/WEAR_CELL+2)   /* integer constant (LOOP_SAMPLES goes through a double) */
 enum { UR_NONE=0, UR_OVERDUB, UR_AUDIO, UR_SETTINGS, UR_PENDING };
@@ -387,7 +392,7 @@ typedef struct {   /* every user-settable value of a loop, for settings undo */
 typedef struct {
     int type, track, group;
     int16_t *bufL,*bufR; uint16_t *gen, genCur, cur;   /* owned buffers: swapped audio, or the overdub diff */
-    int len, count, playHead, hasSet; double playPhase; VoiceState state;   /* hasSet: an AUDIO record that also carries the settings (Clear) */
+    int len, count, playHead, hasSet, dyn;   /* dyn: made by the Dynamic sampler - only its latest capture stays undoable */ double playPhase; VoiceState state;   /* hasSet: an AUDIO record that also carries the settings (Clear) */
     VoiceSettings set;
     float wmap[2][WEAR_MAX]; int wmapOn;   /* the Tape Wear map at the time (only copied when the loop had damage) */
 } UndoRec;
@@ -439,8 +444,13 @@ typedef struct {
     atomic_long qSub, qDone;          /* blocks submitted / finished, exclusive upper bounds */
     long psEngBlock;                  /* block the current engagement started on */
     _Atomic float psSemiReq; float psSemiApplied;   /* semitones: stored by the callback, applied by the worker (atomic: it crosses threads) */
-    int psLate; long psLateCount; double psReady;   /* result missing -> ride to dry over ~3 ms; count for the profile */
+    int psLate, psLateRun, psLateMax; long psLateCount; double psReady;   /* result missing -> ride to dry over ~3 ms; count for the profile */
     int dynDie;                       /* dynamic sampler Sustain: samples until this capture is paused (0 = none / infinite) */
+    int dynSpent;                     /* a capture whose Sustain ran out: its pad is free again, no question asked */
+    int syncPend;                     /* SYNC: 1 = record on the next beat, 2 = play from Start on the next bar */
+    int recTarget;                    /* SYNC: keep recording until this length (the tap-close rounded up to a bar) */
+    double recBpm, tempoSm;           /* tempo the loop was recorded at; the glided varispeed ratio that follows Move's tempo */
+    double winS, winL; int winLEN;    /* glided loop window (start, length in samples); snaps when the recording changes */
     /* Tape Wear (0.9.2): the knob is a RATE of wear; the map is the damage, fixed to the tape. */
     float wear, wearCache; double wearRate; int wearAny;
     float wmap[2][WEAR_MAX];          /* oxide lost per cell, per track (L = the tape-edge track), 0..1 */
@@ -540,7 +550,7 @@ typedef struct { uint8_t n, ext, chance; uint8_t pad[FXSEQ_MAXPADS]; float lock[
 typedef struct {
     int run, speed, len, dir; float gate, swing;
     FxStep st[FXSEQ_STEPS];
-    int pos, pingDir, counter, gateTimer, stepLen, lastTrig, odd, restart; uint32_t rng;
+    int pos, pingDir, counter, gateTimer, stepLen, lastTrig, odd, restart; uint32_t rng; long syncIdx;
     uint8_t seqHeld[NUM_PUNCH], userHeld[NUM_PUNCH];
 } FxSeq;
 
@@ -565,6 +575,11 @@ typedef struct {
     double gSched, stGrid; uint32_t gRng; int gIdx, gPrime;   /* gPrime: first grain fires now + a mid-window one */
     /* glide: per-repeat rate ramp; chop: onset slice + pattern */
     double glRate; int glCycle; int chopStep, chopIdx;
+    /* SYNC: gridWait = samples of live audio left before a slice mech arms on the grid line (the ring keeps
+     * recording meanwhile); liveMix = crossfade from that live audio into the effect; runT/fullT = output time
+     * since arming and the full grid slice, so pressure only changes the subdivision on a full slice line;
+     * pStep = pressure step (with hysteresis); gCell/gUnit = the grid cell a Mosaic / Strum grain last fired in. */
+    int gridWait, pStep; double liveMix, inL, inR, runT, fullT; long gCell; double gUnit;
     /* Palette punch (block-processed, 1-block latency like the send buses) */
     float pinL[128],pinR[128],poutL[128],poutR[128];
     /* shimmer 2-head pitch-shift + LP feedback */
@@ -588,10 +603,16 @@ typedef struct {
     double dynEnvF, dynEnvS;      /* fast / slow peak envelopes of the input */
     int dynRecVoice;              /* -1 idle, else the voice being captured into */
     int dynRecLeft;               /* samples left in the capture, -1 = until the input goes quiet */
-    int dynHold, dynQuiet, dynArmed, dynCursor, dynClockLeft;
+    int dynHold, dynQuiet, dynArmed, dynCursor, dynClockLeft, dynRounded, dynFree;
     double dynCapPeak; int dynCapArmed;   /* per capture: loudest level seen, and whether the input dipped since the triggering hit */
     long dynCount; int dynLastPad;
-    int dynOverwrite, dynWait, dynFull;   /* filled pads are only replaced once the player said yes; until then a full range parks the sampler and raises dynFull for the UI */
+    int dynOverwrite, dynWait, dynFull, dynBase;   /* dynBase: the range's first pad, fixed when Dynamic is switched on */
+    long clkTick; int clkAge, clkFire, clkSeenStart;
+    /* SYNC (0.9.2): a beat grid that always runs, so switching modes never has to start anything.
+     * beatPos advances by the tempo every sample and is pulled onto Move's MIDI clock (Start / Song
+     * Position give it the bar). */
+    int sync; double bpm, beatPos; long beatIdx, barIdx; int startEvt, gridLocked; int dynSizeS; long dynClkIdx;   /* Move's MIDI clock (24 per beat): ticks since Start, samples since the last tick, a boundary to act on */
+    float dynSenseCache; double dynThrCache;          /* Sense -> threshold, recomputed only when Sense moves */   /* filled pads are only replaced once the player said yes; until then a full range parks the sampler and raises dynFull for the UI */
     int inSrcLive;                         /* 1 when the selected source delivered audio this block; 0 = stem unavailable, fell back to Line */
     la_in_shm_t *laShm; int laFd; uint32_t laRead; int laSlotCur;   /* Link Audio track source (OG Move tracks) */
     bpa_shm_t *bpaShm; int bpaFd; uint32_t bpaRead; int bpaSlotCur; /* Schwung published stems source */
@@ -838,11 +859,14 @@ static int wave_compute(Voice *v, char *buf){
  * callback submits a block per pitched loop and collects results PS_D blocks later; if a
  * result is missing it keeps the previous one and rides to dry (voice_render). A worker
  * more than PS_NQ-4 blocks behind drops the backlog: the callback has been riding dry
- * for 30 ms by then, and stale audio through the shifter helps nobody. */
+ * for 35 ms by then, and stale audio through the shifter helps nobody. */
 static inline void lb_enable_ftz(void);   /* FPCR.FZ is PER THREAD: every worker that does float math needs it */
 static void *ps_worker(void *arg){
     int parity=((struct { void *s; int parity; }*)arg)->parity; loopex_t *s=(loopex_t*)((struct { void *s; int parity; }*)arg)->s;
     lb_enable_ftz();   /* the phase vocoder's bins decay to denormals on silent loops: without this the worker crawls and misses deadlines */
+    setpriority(PRIO_PROCESS,(id_t)syscall(SYS_gettid),-10);   /* still SCHED_OTHER (never above Move's realtime threads), but first in line
+                                                              * among the ordinary ones: at nice 0 both workers stalled >23 ms about
+                                                              * every two seconds with 12 pitched loops */
     while(1){
         sem_wait(&s->psSem[parity]);
         if(atomic_load(&s->psCancel)) break;
@@ -869,7 +893,7 @@ static void prof_dump(loopex_t *s){
     fprintf(f,"meter %.0f%% avg / %.0f%% peak\n",s->cpuPct,s->cpuPeak);
     fprintf(f,"state: driftMix=%.3f driftAmt=%.3f mClock=%.3f mClockSpot=%d mfCut=%.3f mfReso=%.3f stMix=%.3f dropAmt=%.3f globalWowFlut=%.3f masterComp=%.3f perfTrem=%.3f masterLoCut=%.0f masterHiCut=%.0f masterEQ=%d masterGlue=%.3f tapeLimit=%.3f globalSat=%.3f tapeGen=%.3f punchWidth=%.3f\n",(double)s->driftMix,(double)s->driftAmt,(double)s->mClock,(int)s->mClockSpot,(double)s->mfCut,(double)s->mfReso,(double)s->stMix,(double)s->dropAmt,(double)s->globalWowFlut,(double)s->masterComp,(double)s->perfTrem,(double)s->masterLoCut,(double)s->masterHiCut,(int)s->masterEQ,(double)s->masterGlue,(double)s->tapeLimit,(double)s->globalSat,(double)s->tapeGen,(double)s->punchWidth);
     for(int i=0;i<NUM_VOICES;i++){ Voice *v=&s->voice[i]; if(v->psActive)
-        fprintf(f,"shifter ACTIVE on loop %d: Pit=%.4f (%.2f st) mix=%.3f warm=%d/%d late=%ld\n",i+1,v->clock,v->clock*12.0f,v->psMix,v->psWarm,v->psLat,v->psLateCount); }
+        fprintf(f,"shifter ACTIVE on loop %d: Pit=%.4f (%.2f st) mix=%.3f warm=%d/%d late=%ld longest=%d blocks\n",i+1,v->clock,v->clock*12.0f,v->psMix,v->psWarm,v->psLat,v->psLateCount,v->psLateMax); }
     fclose(f);
 }
 static void *session_worker(void *arg){
@@ -948,6 +972,7 @@ static void *session_worker(void *arg){
                 Voice *v=&s->voice[i];
                 v->state=VS_EMPTY; v->loopLen=0;      /* render now skips this voice — safe to fill */
                 v->playPhase=0.0; v->playHead=0; v->playEnv=0.0; v->muted=0; v->glLastSlice=-1; wear_zero(v);
+                v->wear=0.0f; v->wearCache=-1.0f; v->recBpm=0.0; v->tempoSm=1.0;   /* state.txt only lists non-zero Wear / a known tempo: never inherit the pad's old ones */
                 int len=lens[i]; if(len>LOOP_SAMPLES)len=LOOP_SAMPLES; if(len<=0) continue;
                 snprintf(path,sizeof path,"%s/s%02d_loop%02d.wav",dir,slot,i+1);
                 int n=wav_read(path,v->bufferL,v->bufferR,len);
@@ -981,7 +1006,7 @@ static void *session_worker(void *arg){
                 if(len>0){
                     memcpy(dst->bufferL,src->bufferL,(size_t)len*sizeof(int16_t));
                     memcpy(dst->bufferR,src->bufferR,(size_t)len*sizeof(int16_t));
-                    memcpy(dst->wmap,src->wmap,sizeof dst->wmap); dst->wearAny=src->wearAny; dst->wear=src->wear;   /* the clone is the same worn tape */
+                    memcpy(dst->wmap,src->wmap,sizeof dst->wmap); dst->wearAny=src->wearAny; dst->wear=src->wear; dst->recBpm=src->recBpm;   /* the clone is the same worn tape */
                     dst->loopStart=src->loopStart; dst->loopEnd=src->loopEnd; dst->reverse=src->reverse;
                     dst->pitch=src->pitch; dst->filter=src->filter; dst->pan=src->pan; dst->volume=src->volume;
                     for(int hk=0;hk<4;hk++){ dst->hVol[hk]=src->hVol[hk]; dst->hPan[hk]=src->hPan[hk]; }
@@ -1257,7 +1282,7 @@ static void voice_randomize(Voice *v, double amt) {
     /* Start / End: half the time the full loop; otherwise Start in the first half and End drawn so
      * the window is never under HALF the loop (End is a fraction of what is left after Start).
      * Slivers on four heads were mush. */
-    if(RU01()<0.5){ RF(loopStart,0.0,0.5); double mn=0.5/(1.0-(double)v->loopStart); if(mn>1.0)mn=1.0; RF(loopEnd,mn,1.0); }
+    if(RU01()<0.5){ RF(loopStart,0.0,0.5); RF(loopEnd,0.5,1.0);   /* Start <= 0.5 and End >= 0.5 of the loop: the window is never under half */ }
     else { v->loopStart=(float)((double)v->loopStart*(1.0-amt)); v->loopEnd=(float)((double)v->loopEnd+(1.0-(double)v->loopEnd)*amt); }
     if(RU01()<amt) v->reverse=(RU01()<0.5)?0.0f:1.0f;
     RF(send,0.0,0.6); RF(sendB,0.0,0.6); RF(djReso,0.0,0.6);            /* sends, reso, comp and sat: never past 60% */
@@ -1300,7 +1325,7 @@ static UndoRec *undo_push(loopex_t *s, int type, int track){
     for(int guard=0;guard<UNDO_N && s->hist[s->histTop].type==UR_PENDING;guard++) s->histTop=(s->histTop+1)%UNDO_N;
     int i=s->histTop; UndoRec *r=&s->hist[i];
     if(s->odRec==i) s->odRec=-1;
-    r->type=type; r->track=track; r->group=s->histGroup; r->count=0; r->hasSet=0;
+    r->type=type; r->track=track; r->group=s->histGroup; r->count=0; r->hasSet=0; r->dyn=0;
     s->histTop=(i+1)%UNDO_N; if(s->histN<UNDO_N) s->histN++;
     return r;
 }
@@ -1319,6 +1344,7 @@ static void undo_audio_set(loopex_t *s, Voice *v){
     undo_audio(s,v); UndoRec *r=&s->hist[(s->histTop-1+UNDO_N)%UNDO_N]; settings_get(v,&r->set); r->hasSet=1;
 }
 static inline void voice_clear(Voice *v) {
+    v->syncPend=0; v->recTarget=0;
     if(v->loopLen>0)v->savedLoopLen=v->loopLen;   /* remember for undo (buffer samples are kept) */
     v->state=VS_EMPTY;v->loopLen=0;v->recHead=0;v->playHead=0;v->playPhase=0.0;v->dubSamples=0;v->disintGen=0;
     v->glLastSlice=-1;v->stabLpStateL=0.0;v->stabLpStateR=0.0;v->muted=0;
@@ -1333,56 +1359,84 @@ static inline void voice_clear(Voice *v) {
  * by that fraction; Sustain pauses it after a while (its own Decay fades it), so the
  * pad is free for the next round. All of it is callback-safe field work. */
 static inline double punch_beat(void);   /* defined with the punch engine, below */
+static int sync_round_len(const loopex_t *s, int L);   /* SYNC, defined below */
 static void loop_clear(loopex_t *s, Voice *v);   /* defined with the undo history, below */
-static inline double dyn_thr(const loopex_t *s){ return pow(10.0,(-60.0+54.0*(double)s->dynSense)/20.0); }   /* Sense: -60 .. -6 dBFS */
+static inline double dyn_thr(loopex_t *s){   /* Sense: -60 .. -6 dBFS; pow() only when Sense moves */
+    if(s->dynSense!=s->dynSenseCache){ s->dynThrCache=pow(10.0,(-60.0+54.0*(double)s->dynSense)/20.0); s->dynSenseCache=s->dynSense; }
+    return s->dynThrCache; }
+static const double DYN_BEATS[8]={0.25,0.5,1.0,2.0,4.0,8.0,16.0,32.0};   /* 1/16 .. 8 bars (4/4) */
+static inline int dyn_size_raw(const loopex_t *s){ return s->sync?s->dynSizeS:s->dynSize; }   /* each mode keeps its own Size (SYNC default 1 bar) */
+static inline int dyn_size_idx(const loopex_t *s){ int i=dyn_size_raw(s); if(i<0)i=0; if(i>=8)i=4; return i; }   /* Free has no length: where one is needed (Clock), it means 1 bar */
 static int dyn_size_samples(const loopex_t *s){
-    static const double beats[8]={0.25,0.5,1.0,2.0,4.0,8.0,16.0,32.0};   /* 1/16 .. 8 bars (4/4) */
-    int i=s->dynSize; if(i<0)i=0; if(i>7)i=7;
+    const double *beats=DYN_BEATS;
+    int i=dyn_size_idx(s);
     double n=punch_beat()*beats[i]; if(n>(double)LOOP_SAMPLES)n=(double)LOOP_SAMPLES; return (int)n;
 }
 static int dyn_sustain_samples(const loopex_t *s){
     double k=(double)s->dynSustain; if(k>=0.99) return 0;                 /* top of the knob = hold forever */
+    if(s->sync){ double bars=floor(pow(64.0,k)+0.5); if(bars<1.0)bars=1.0; return (int)(bars*4.0*60.0*SR/(s->bpm>20.0?s->bpm:120.0)); }   /* SYNC: 1 .. 64 bars */
     return (int)(SR*pow(60.0,k));                                          /* 1 s .. 60 s, log */
 }
 static void dyn_start(loopex_t *s, int preroll){
-    int sel=s->selTrack-1; if(sel<0||sel>=NUM_VOICES)sel=0;
+    int sel=s->dynBase; if(sel<0||sel>=NUM_VOICES)sel=0;   /* anchored: selecting or tapping pads doesn't move the range */
     int spread=s->dynSpread; if(spread<1)spread=1; if(spread>NUM_VOICES)spread=NUM_VOICES;
     int t=-1, filled=0;
     for(int k=0;k<spread;k++){ int slot=(s->dynCursor+k)%spread; int ci=(sel+slot)%NUM_VOICES; Voice *v=&s->voice[ci];
         if(v->muted||v->armed||v->state==VS_RECORDING||v->state==VS_OVERDUBBING) continue;
-        if(v->loopLen>0 && !s->dynOverwrite){ filled=1; continue; }      /* holds a loop: not without permission */
+        if(v->loopLen>0 && !s->dynOverwrite && !v->dynSpent){ filled=1; continue; }   /* holds a loop: not without permission (a capture whose Sustain ran out is fair game) */
         t=ci; s->dynCursor=slot; break; }
     if(t<0){ if(filled){ s->dynWait=1; s->dynFull=1; } return; }         /* full: park, and let the UI ask */
     Voice *v=&s->voice[t];
-    s->histGroup++; s->dynGroup=s->histGroup; loop_clear(s,v);              /* what was there is replaced - and Undo has it */
-    v->state=VS_RECORDING; v->loopLen=0; v->recHead=0; v->disintGen=0; v->dynDie=0; wear_zero(v);
+    /* Only the LATEST capture stays undoable: a running sampler would otherwise flush the player's own
+     * undo steps. If the top of the history is still the previous capture, drop it. */
+    while(s->histN>0){ int ti=(s->histTop-1+UNDO_N)%UNDO_N; UndoRec *tr=&s->hist[ti]; if(!tr->dyn||tr->type==UR_PENDING) break;
+        tr->type=UR_NONE; s->histTop=ti; s->histN--; }
+    s->histGroup++; s->dynGroup=s->histGroup;
+    { int before=s->histN; loop_clear(s,v); if(s->histN>before) s->hist[(s->histTop-1+UNDO_N)%UNDO_N].dyn=1; }   /* what was there is replaced - and Undo has it */
+    v->state=VS_RECORDING; v->loopLen=0; v->recHead=0; v->disintGen=0; v->dynDie=0; v->dynSpent=0; wear_zero(v);
     if(preroll){ int r=s->dynPreW;                                          /* oldest sample first */
         for(int i=0;i<DYN_PRE;i++){ v->bufferL[i]=s->dynPreL[r]; v->bufferR[i]=s->dynPreR[r]; r++; if(r>=DYN_PRE)r=0; }
         v->recHead=DYN_PRE; }
-    int free_=(s->dynMode==3||s->dynSize>=8);                                /* Phrase, or Size = Free: run until quiet */
-    s->dynRecLeft = free_ ? -1 : dyn_size_samples(s)-v->recHead; if(!free_ && s->dynRecLeft<64) s->dynRecLeft=64;
-    s->dynRecVoice=t; s->dynQuiet=0; s->dynCount++; s->dynLastPad=t; s->dynCapPeak=0.0; s->dynCapArmed=0;
+    int free_=(s->dynMode==3||(dyn_size_raw(s)>=8&&s->dynMode!=6));             /* Phrase, or Size = Free (not Clock: it needs a length): run until quiet */
+    s->dynFree=free_; s->dynRecLeft = free_ ? -1 : dyn_size_samples(s)-v->recHead; if(!free_ && s->dynRecLeft<64) s->dynRecLeft=64;
+    s->dynRecVoice=t; s->dynQuiet=0; s->dynRounded=0; v->recBpm=s->bpm; v->tempoSm=1.0; v->syncPend=0; s->dynCount++; s->dynLastPad=t; s->dynCapPeak=0.0; s->dynCapArmed=0;
 }
 static void dyn_finish(loopex_t *s){
     Voice *v=&s->voice[s->dynRecVoice];
+    /* SYNC (not Clock, whose captures already are grid lengths): round the capture to whole bars -
+     * keep capturing to the bar line, or trim - and bring it in on the next bar. */
+    if(s->sync && s->dynMode!=6 && s->dynFree && v->state==VS_RECORDING && !s->dynRounded){   /* only Free captures: a set Size is on the grid already */ int t=sync_round_len(s,v->recHead);
+        if(t>v->recHead){ s->dynRounded=1; s->dynRecLeft=t-v->recHead; return; } v->recHead=t; }
+    s->dynRounded=0;
     if(v->state==VS_RECORDING){ v->loopLen=v->recHead; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING;
-        if(s->dynError>0.001f){ int g=s->histGroup; s->histGroup=s->dynGroup; undo_settings(s,v); s->histGroup=g; voice_randomize(v,(double)s->dynError); }
+        if(s->sync && s->dynMode!=6 && s->dynFree){ v->state=VS_PAUSED; v->syncPend=2; }
+        if(s->dynError>0.001f){ int g=s->histGroup; s->histGroup=s->dynGroup; undo_settings(s,v); s->hist[(s->histTop-1+UNDO_N)%UNDO_N].dyn=1; s->histGroup=g; voice_randomize(v,(double)s->dynError); }
         v->dynDie=dyn_sustain_samples(s); }
     s->dynRecVoice=-1; s->dynHold=(int)(SR*0.05); s->dynArmed=0;
     int spread=s->dynSpread; if(spread<1)spread=1; s->dynCursor=(s->dynCursor+1)%spread;
 }
 /* Per sample, on the finished input, before the record loop. */
 static inline void dyn_sample(loopex_t *s, int16_t inSL, int16_t inSR){
-    s->dynPreL[s->dynPreW]=inSL; s->dynPreR[s->dynPreW]=inSR; if(++s->dynPreW>=DYN_PRE)s->dynPreW=0;
     double a=(double)(abs(inSL)>abs(inSR)?abs(inSL):abs(inSR))/32768.0;
     s->dynEnvF+=(a>s->dynEnvF)?(a-s->dynEnvF)*0.2:(a-s->dynEnvF)*0.0005;   /* ~0.1 ms up, ~45 ms down */
     s->dynEnvS+=(a-s->dynEnvS)*0.00008;                                       /* ~280 ms running level */
     if(s->dynHold>0)s->dynHold--;
     double thr=dyn_thr(s);
+    /* Clock: boundaries come from Move's MIDI clock when it runs (on the beat; on the bar if Loopex
+     * saw Start), else from a free-running counter. Either way it keeps counting WHILE a capture
+     * records - it used to freeze, so 'every bar' was really every other bar. A boundary closes the
+     * running capture and opens the next. */
+    if(s->dynMode==6){ int boundary=0;
+        if(s->sync){ double per=DYN_BEATS[dyn_size_idx(s)]; long ci=(long)floor(s->beatPos/per); if(ci!=s->dynClkIdx){ if(s->dynClkIdx!=-1) boundary=1; s->dynClkIdx=ci; } }   /* SYNC: the shared grid */
+        else if(s->clkAge<(int)(SR*0.5)){ if(s->clkFire){ s->clkFire=0; boundary=1; } }
+        else if(--s->dynClockLeft<=0){ s->dynClockLeft=dyn_size_samples(s); if(s->dynClockLeft<64)s->dynClockLeft=64; boundary=1; }
+        if(boundary){ if(s->dynRecVoice>=0) dyn_finish(s);
+            if(!s->dynWait && s->inSource!=10 && s->dynEnvS>thr*0.1) dyn_start(s,0);
+            return; } }
     if(s->dynRecVoice>=0){
         Voice *v=&s->voice[s->dynRecVoice]; int stop=0;
         if(v->state!=VS_RECORDING) stop=1;                                     /* the player took the pad back */
-        else if(s->dynRecLeft>0){ if(--s->dynRecLeft<=0) stop=1; }
+        else if(s->dynRecLeft>0){ if(--s->dynRecLeft<=0 && (s->dynMode!=6||s->dynRounded)) stop=1; }   /* Clock captures end at the next boundary */
         else { if(a>s->dynCapPeak) s->dynCapPeak=a;
                /* Free / Phrase: 200 ms of quiet ends it, after at least 100 ms. In Onset mode Sense is a
                 * contrast, not a level, so 'quiet' is 20 dB under the capture's own peak instead. */
@@ -1390,24 +1444,51 @@ static inline void dyn_sample(loopex_t *s, int16_t inSL, int16_t inSR){
                if(a<q) s->dynQuiet++; else s->dynQuiet=0;
                if(s->dynMode==2){   /* the next hit ends this capture and starts the next one, pre-roll and all */
                    if(!s->dynCapArmed){ if(s->dynEnvF<s->dynEnvS*1.2+1e-4) s->dynCapArmed=1; }
-                   else if(s->dynEnvF-s->dynEnvS*2.0>thr && v->recHead>=(int)(SR*0.1)){ dyn_finish(s); dyn_start(s,1); return; } }
-               if(s->dynQuiet>=(int)(SR*0.2) && v->recHead>=(int)(SR*0.1)) stop=1; }
+                   else if(s->dynEnvF-s->dynEnvS*2.0>thr && v->recHead>=(int)(SR*0.1)){ dyn_finish(s); if(s->dynRecVoice<0) dyn_start(s,1); return; } }   /* not while SYNC is rounding it */
+               /* Phrase is a SENTENCE: gaps under 400 ms don't end it and it lasts at least 1 s. */
+               int gap=(s->dynMode==3)?(int)(SR*0.4):(int)(SR*0.2), minLen=(s->dynMode==3)?(int)SR:(int)(SR*0.1);
+               if(s->dynQuiet>=gap && v->recHead>=minLen) stop=1; }
         if(v->recHead>=LOOP_SAMPLES-1) stop=1;
         if(stop) dyn_finish(s);
         return;
     }
     if(s->dynHold>0||s->dynWait) return;
+    if(s->inSource==10) return;   /* InSrc = Self: the sampler would capture its own playback, forever */
     int trig=0;
     switch(s->dynMode){
         case 1: case 3:   /* Level / Phrase: cross the threshold, re-arm once it fell to half */
             if(!s->dynArmed){ if(s->dynEnvF<thr*0.5) s->dynArmed=1; } else if(s->dynEnvF>thr) trig=1; break;
         case 2:           /* Onset: the fast envelope jumps well above the running level */
             if(!s->dynArmed){ if(s->dynEnvF<s->dynEnvS*1.2+1e-4) s->dynArmed=1; } else if(s->dynEnvF-s->dynEnvS*2.0>thr) trig=1; break;
-        case 6:           /* Clock: every Size, if there is signal */
-            if(--s->dynClockLeft<=0){ s->dynClockLeft=dyn_size_samples(s); if(s->dynClockLeft<64)s->dynClockLeft=64; if(s->dynEnvS>thr*0.1) trig=2; } break;
+        case 6: break;    /* Clock: handled above, on the boundaries */
         default: break;   /* Pitch / Novelty: analysis on the worker, next release */
     }
     if(trig) dyn_start(s, trig==1);                                            /* Clock captures start on the beat, no pre-roll */
+}
+/* ---- SYNC helpers ----------------------------------------------------------------------------- */
+static inline double sync_beatS(const loopex_t *s){ double b=s->bpm; if(b<20.0)b=120.0; return 60.0*SR/b; }   /* samples per beat, now */
+static inline double loop_beatS(const loopex_t *s, const Voice *v){ double b=(v->recBpm>1.0)?v->recBpm:s->bpm; if(b<20.0)b=120.0; return 60.0*SR/b; }   /* in the loop's own buffer */
+/* A tap-close in SYNC: round the take to whole bars (a take under 3/4 bar: to whole beats, at least 1).
+ * Rounded up -> keep recording to the bar line; rounded down -> trim. */
+static int sync_round_len(const loopex_t *s, int L){
+    double bs=sync_beatS(s), bar=4.0*bs; double t;
+    if((double)L>=bar*0.75) t=floor((double)L/bar+0.5)*bar; else { t=floor((double)L/bs+0.5); if(t<1.0)t=1.0; t*=bs; }
+    if(t>(double)LOOP_SAMPLES) t=floor((double)LOOP_SAMPLES/bar)*bar; if(t<bs)t=bs;
+    return (int)(t+0.5);
+}
+/* Start a take now, with the last `late` samples of input as its head (a tap that came just AFTER the beat). */
+static void sync_rec_begin(loopex_t *s, Voice *v, int late){
+    v->state=VS_RECORDING; v->recHead=0; v->loopLen=0; v->disintGen=0; v->recTarget=0; v->syncPend=0; v->recBpm=s->bpm; v->tempoSm=1.0; wear_zero(v);
+    if(late>0){ if(late>DYN_PRE-1)late=DYN_PRE-1; int r=(s->dynPreW-late+DYN_PRE)%DYN_PRE;
+        for(int i=0;i<late;i++){ v->bufferL[i]=s->dynPreL[r]; v->bufferR[i]=s->dynPreR[r]; r++; if(r>=DYN_PRE)r=0; } v->recHead=late; }
+}
+/* Beat / bar events of the grid; also flushes anything pending when SYNC is switched off. */
+static void sync_events(loopex_t *s, int beat, int bar){
+    for(int i=0;i<NUM_VOICES;i++){ Voice *v=&s->voice[i]; if(!v->syncPend) continue;
+        if(v->syncPend==1 && (beat||!s->sync)){ if(v->state==VS_EMPTY) sync_rec_begin(s,v,0); else v->syncPend=0; }
+        else if(v->syncPend==2 && (bar||!s->sync)){ v->syncPend=0; if(v->state==VS_PAUSED&&v->loopLen>0){ v->state=VS_PLAYING; v->retrigPend=1; } } }
+    if(s->startEvt){ s->startEvt=0;   /* Move pressed Play: every playing loop from Start, on bar 1 (crossfaded) */
+        if(s->sync) for(int i=0;i<NUM_VOICES;i++){ Voice *v=&s->voice[i]; if(v->state==VS_PLAYING&&v->loopLen>0) v->retrigPend=1; } }
 }
 /* Undo a clear: the buffer was never wiped, so restore length + playback. */
 static inline void voice_unclear(Voice *v) {
@@ -1509,15 +1590,54 @@ static inline double punch_beat(void){
     double bpm=(g_host&&g_host->get_bpm)?(double)g_host->get_bpm():120.0; if(bpm<20.0)bpm=120.0;
     return SR*60.0/bpm;
 }
-/* Slice geometry for the slice-based mechs (REPEAT / REVERSE / GLIDE / CHOP). */
-static double punch_slice_len(const PunchDef *d, const float *P, double beat){
+/* SYNC note values, in beats: 1/32 .. 2 bars, triplets included. */
+static const double NV_B[11]={0.125,1.0/6.0,0.25,1.0/3.0,0.5,2.0/3.0,1.0,4.0/3.0,2.0,4.0,8.0};
+/* The note value nearest b (in log - so 1/8T sits between 1/16 and 1/8), no longer than maxB. */
+static double nv_snap(double b, double maxB){
+    double best=NV_B[0], bd=1e9;
+    for(int i=0;i<11;i++){ if(NV_B[i]>maxB*1.0001 && i>0) break; double e=fabs(log2(NV_B[i]/b)); if(e<bd){ bd=e; best=NV_B[i]; } }
+    return best;
+}
+/* Reverse's constant-power loop overlaps XF = min(el/4, 1024) samples, so it repeats every hop = el-XF.
+ * rev_el gives the slice whose hop is exactly `per` samples - so in SYNC the reversals land on the grid. */
+static inline double rev_el(double per){ return (per/3.0<=1024.0)?per*4.0/3.0:per+1024.0; }
+static inline double rev_hop(double el){ double XF=el*0.25; if(XF>1024.0)XF=1024.0; return el-XF; }
+/* Pressure as n steps, with hysteresis so a pad resting on a boundary can't flutter between two. */
+static inline int press_step(int *st, double press, int n){
+    double x=press*(double)n; int k=*st;
+    if(x>(double)k+1.15||x<(double)k-0.15) k=(int)x;
+    if(k<0)k=0; if(k>n-1)k=n-1; *st=k; return k;
+}
+/* Slice geometry for the slice-based mechs (REPEAT / REVERSE / GLIDE / CHOP). *full = the grid unit the slice
+ * repeats on (Reverse: its hop). In SYNC the Rate / Len knob lands on note values, triplets included. */
+static double punch_slice_len(const loopex_t *s, const PunchDef *d, const float *P, double beat, double *full){
     double sl;
     if(d->mech==PM_REVERSE)      sl=beat*(0.25+(double)P[0]*1.75);
     else if(d->mech==PM_CHOP)    sl=beat/(double)(1<<(int)((double)P[0]*3.99));
     else if(d->mech==PM_GLIDE)   sl=beat/4.0*pow(4.0,((double)P[0]-0.5)*2.0);
     else                         sl=beat/d->param*pow(4.0,((double)P[0]-0.5)*2.0);   /* REPEAT */
+    double capB=(double)(PUNCH_BUF/2)/beat, fu;
+    if(s->sync && d->mech==PM_REVERSE){ double per=nv_snap(sl/beat,capB)*beat; while(rev_el(per)>(double)(PUNCH_BUF/2) && per>beat*0.125) per*=0.5;
+        sl=rev_el(per); fu=per; }
+    else if(s->sync && d->mech!=PM_CHOP){ sl=nv_snap(sl/beat,capB)*beat; fu=sl; }   /* Chop is on the grid already (1/4 .. 1/32) */
+    else fu=(d->mech==PM_REVERSE)?rev_hop(sl):sl;
     if(sl<256.0)sl=256.0; if(sl>PUNCH_BUF/2)sl=PUNCH_BUF/2;
+    if(full)*full=fu;
     return sl;
+}
+/* Cut the slice to repeat: the last sliceLen samples of the ring (`written`: this sample is in it already). */
+static void punch_slice_arm(loopex_t *s, PunchSlot *ps, const PunchDef *d, const float *P, double beat, int written){
+    double sl=ps->sliceLen; int end=ps->w+(written?1:0);
+    int st=((end-(int)sl)%PUNCH_BUF+PUNCH_BUF)%PUNCH_BUF; ps->sliceStart=(double)st;
+    ps->readPhase=(d->mech==PM_REVERSE)?((s->sync?rev_hop(sl):sl)-1.0):0.0;   /* SYNC: the first reversal is one hop, like the rest */
+    ps->elCur=0.0; ps->runT=0.0;
+    if(d->mech==PM_CHOP){
+        /* Onset: the loudest moment in the last beat becomes the hit we chop. */
+        int span=(int)beat; if(span>PUNCH_BUF-64)span=PUNCH_BUF-64; int best=0; float pk=0.0f;
+        for(int j=0;j<span;j+=32){ int ix=(end-1-j+PUNCH_BUF)%PUNCH_BUF; float a=ps->ringL[ix]; if(a<0)a=-a; if(a>pk){pk=a;best=j;} }
+        int st2=(end-1-best-160+PUNCH_BUF)%PUNCH_BUF; ps->sliceStart=(double)st2;   /* 160-sample pre-roll */
+        ps->chopIdx=(int)((double)P[1]*(NUM_CHOP_PAT-0.01)); if(ps->chopIdx<0)ps->chopIdx=0; if(ps->chopIdx>=NUM_CHOP_PAT)ps->chopIdx=NUM_CHOP_PAT-1;
+    }
 }
 /* Start a slot on effect idx, using that effect's stored params (s->punchParams[idx]). */
 static void punch_slot_start(loopex_t *s, PunchSlot *ps, int idx){
@@ -1527,18 +1647,17 @@ static void punch_slot_start(loopex_t *s, PunchSlot *ps, int idx){
     ps->dblW=0; ps->dblHold=(int)(SR*0.02); ps->dblPh=0.0; ps->dblGain=0.0f; memset(ps->dblBuf,0,sizeof ps->dblBuf);
     double beat=punch_beat();
     if(ps->gRng==0)ps->gRng=0x1234567u+(uint32_t)idx*2654435761u;
+    ps->gridWait=0; ps->pStep=0; ps->liveMix=0.0; ps->inL=ps->inR=0.0; ps->runT=0.0; ps->gCell=0; ps->gUnit=0.0;
+    if(s->sync&&(d->mech==PM_MOSAIC||d->mech==PM_STRUM)) ps->gridWait=1;   /* SYNC: live until the first grid line */
     if(d->mech==PM_REPEAT||d->mech==PM_REVERSE||d->mech==PM_GLIDE||d->mech==PM_CHOP){
-        double sl=punch_slice_len(d,P,beat);
-        ps->sliceLen=sl; int st=(((int)ps->w-(int)sl)%PUNCH_BUF+PUNCH_BUF)%PUNCH_BUF; ps->sliceStart=(double)st;
-        ps->readPhase=(d->mech==PM_REVERSE)?(sl-1.0):0.0;
+        double full, sl=punch_slice_len(s,d,P,beat,&full);
+        ps->sliceLen=sl; ps->fullT=full;
         ps->glRate=1.0; ps->glCycle=0; ps->chopStep=0;
-        if(d->mech==PM_CHOP){
-            /* Onset: the loudest moment in the last beat becomes the hit we chop. */
-            int span=(int)beat; if(span>PUNCH_BUF-64)span=PUNCH_BUF-64; int best=0; float pk=0.0f;
-            for(int j=0;j<span;j+=32){ int ix=(ps->w-1-j+PUNCH_BUF)%PUNCH_BUF; float a=ps->ringL[ix]; if(a<0)a=-a; if(a>pk){pk=a;best=j;} }
-            int st2=(ps->w-1-best-160+PUNCH_BUF)%PUNCH_BUF; ps->sliceStart=(double)st2;   /* 160-sample pre-roll */
-            ps->chopIdx=(int)((double)P[1]*(NUM_CHOP_PAT-0.01)); if(ps->chopIdx<0)ps->chopIdx=0; if(ps->chopIdx>=NUM_CHOP_PAT)ps->chopIdx=NUM_CHOP_PAT-1;
-        }
+        if(s->sync){   /* SYNC: live audio until the next grid line, then the slice that just played repeats ON the grid.
+                        * (The ring keeps recording while it waits - punch_holds_ring.) */
+            double off=fmod(s->beatPos*beat,full); if(off<0.0)off+=full;
+            ps->gridWait=(int)(full-off); if(ps->gridWait<1)ps->gridWait=1; ps->liveMix=1.0; ps->readPhase=0.0; ps->elCur=0.0; }
+        else punch_slice_arm(s,ps,d,P,beat,0);
     }
     else if(d->mech==PM_PALETTE){ memset(ps->poutL,0,sizeof ps->poutL); memset(ps->poutR,0,sizeof ps->poutR); }
     else if(d->mech==PM_PITCH){ ps->readPhase=2048.0; }   /* mid-window delay (2-head shifter) */
@@ -1554,15 +1673,16 @@ static void punch_slot_start(loopex_t *s, PunchSlot *ps, int idx){
 static void punch_slot_retune(loopex_t *s, PunchSlot *ps, int idx){
     const PunchDef *d=&PUNCH_DEFS[idx]; float *P=s->punchParams[idx];
     if(d->mech!=PM_REPEAT&&d->mech!=PM_REVERSE&&d->mech!=PM_GLIDE&&d->mech!=PM_CHOP) return;
-    double sl=punch_slice_len(d,P,punch_beat());
-    ps->sliceLen=sl;   /* elCur picks this up at the next wrap (the slice edge is faded there) */
+    double full, sl=punch_slice_len(s,d,P,punch_beat(),&full);
+    ps->sliceLen=sl; ps->fullT=full;   /* elCur picks this up at the next wrap (the slice edge is faded there) */
+    if(ps->gridWait>0) return;   /* not armed yet: it cuts the new length on the grid line */
     /* the ring is frozen while a slice mech holds, so w is still the capture end: end-anchored re-cut */
     if(d->mech!=PM_CHOP){ int st=(((int)ps->w-(int)sl)%PUNCH_BUF+PUNCH_BUF)%PUNCH_BUF; ps->sliceStartT=(double)st; }
 }
 /* Slice mechs and a frozen Stretch read a snapshot: the ring stops writing while they
  * hold, so a loop held longer than the 2 s ring is never overwritten under the head. */
 static inline int punch_holds_ring(const loopex_t *s, const PunchSlot *ps){
-    if(ps->idx<0||ps->releasing) return 0;
+    if(ps->idx<0||ps->releasing||ps->gridWait>0) return 0;   /* SYNC wait: still recording the slice it will repeat */
     int m=PUNCH_DEFS[ps->idx].mech;
     if(m==PM_REPEAT||m==PM_REVERSE||m==PM_GLIDE||m==PM_CHOP) return 1;
     if(m==PM_STRETCH){ const float *P=s->punchParams[ps->idx]; return ((1.0-(double)P[0])*(1.0-ps->pressSm))<0.02; }
@@ -1632,6 +1752,13 @@ static void fxseq_tick(loopex_t *s, int frames){
         for(int i=0;i<FXSEQ_STEPS;i++) f->st[i].cycles=0; fxseq_off_all(s); }
     if(!f->run){ fxseq_off_all(s); return; }
     if(f->gateTimer>0){ f->gateTimer-=frames; if(f->gateTimer<=0){ f->gateTimer=-1; fxseq_off_all(s); } }
+    if(s->sync){   /* SYNC: steps come from the bar grid (swing included); the free counter waits for ASYNC */
+        double div=FXSEQ_DIV[f->speed], sw=((double)f->swing-0.5)*2.0, p=s->beatPos/(2.0*div); long m=(long)floor(p); double fr=p-(double)m;
+        long idx=2*m+((fr>=(1.0+sw)*0.5)?1:0);
+        if(f->syncIdx==-999999) f->syncIdx=idx;   /* entering SYNC: join the grid, no extra step */
+        if(idx!=f->syncIdx){ f->syncIdx=idx; f->stepLen=(int)(punch_beat()*div); fxseq_next(f); fxseq_apply(s,f->pos); }
+        f->counter=f->stepLen>0?f->stepLen:64; return; }
+    f->syncIdx=-999999;
     f->counter-=frames;
     while(f->counter<=0){
         double sl=punch_beat()*FXSEQ_DIV[f->speed]; f->stepLen=(int)sl;
@@ -1706,13 +1833,22 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
     if(d->mech==PM_PALETTE){   /* one Palette effect as a punch: this block in, last block out */
         ps->pinL[n]=ps->ringL[ps->w]; ps->pinR[n]=ps->ringR[ps->w];
         *outL=(double)ps->poutL[n]; *outR=(double)ps->poutR[n]; return; }
-    ps->pressSm+=((double)s->punchPress[ps->idx]-ps->pressSm)*0.002;   /* ~11 ms */
+    { double pt=(double)s->punchPress[ps->idx];
+      if(s->sync) ps->pressSm+=(pt-ps->pressSm)*0.002;                             /* ~11 ms: SYNC steps it anyway */
+      else ps->pressSm+=(pt-ps->pressSm)*((pt>ps->pressSm)?0.0015:0.00035); }      /* ASYNC: in ~15 ms, blooms out over ~65 ms */
     double press=ps->pressSm;
     /* per-effect LFO (knobs 1-4 = dest, shape, speed, depth): modulates one fx param */
     { const float *Lf=s->punchLfo[ps->idx]; int dest=(int)(Lf[0]*4.99f);
       if(dest>0){ if(!ps->lfoInit){ ps->lfoInit=1; ps->lfoRng=0x2545f491u+(uint32_t)ps->idx*2654435761u; ps->lfoTgt=ps->lfoCur=0.0f; }
-        int shape=(int)(Lf[1]*7.99f); double hz=0.05*pow(400.0,(double)Lf[2]); double ph=ps->lfoPh;
-        ps->lfoPh+=hz/SR; int wrapped=0; if(ps->lfoPh>=1.0){ ps->lfoPh-=1.0; wrapped=1; }
+        int shape=(int)(Lf[1]*7.99f); double ph=ps->lfoPh; int wrapped=0;
+        if(s->sync){   /* SYNC: a note value (8 bars .. 1/32, triplets included), phase-locked to the bar - slewed on, never a jump */
+            static const double LB[12]={32.0,16.0,8.0,4.0,2.0,1.0,2.0/3.0,0.5,1.0/3.0,0.25,1.0/6.0,0.125};
+            int li=(int)lround((double)Lf[2]*11.0); if(li<0)li=0; if(li>11)li=11;
+            double per=LB[li], tgt=fmod(s->beatPos/per,1.0); if(tgt<0.0)tgt+=1.0;
+            double e=tgt-ps->lfoPh; e-=floor(e+0.5);
+            ps->lfoPh+=1.0/(per*punch_beat())+e*0.002; }
+        else ps->lfoPh+=0.05*pow(400.0,(double)Lf[2])/SR;
+        if(ps->lfoPh>=1.0){ ps->lfoPh-=1.0; wrapped=1; } else if(ps->lfoPh<0.0) ps->lfoPh+=1.0;
         double v;
         switch(shape){
           case 1: v=1.0-4.0*fabs(ph-0.5); break;                         /* triangle */
@@ -1753,9 +1889,16 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
         double g=smear?0.8:0.9; *outL=sl*g; *outR=sr*g; return; }
     if(d->mech==PM_MOSAIC){   /* grid-synced re-sequencer: P0=Grid P1=Pitch P2=Var; pressure = grid x2 */
         double beat=punch_beat(); int dv=1<<(int)((double)P[0]*3.99); double grid=beat/(double)dv;
-        if(press>0.5)grid*=0.5;
-        ps->gSched+=1.0;
-        if(ps->gSched>=grid){ ps->gSched-=grid; if(ps->gSched>grid)ps->gSched=0.0;
+        int fire;
+        if(s->sync){   /* SYNC: pressure steps to the next subdivision; grains fire ON the grid lines, live audio until the first */
+            if(press_step(&ps->pStep,press,2))grid*=0.5;
+            double gp=s->beatPos*beat; long c=(long)floor(gp/grid);
+            if(grid!=ps->gUnit){ ps->gUnit=grid; ps->gCell=c; }   /* new unit: resync, no extra grain */
+            fire=(c!=ps->gCell); ps->gCell=c; if(fire&&ps->gridWait){ ps->gridWait=0; ps->liveMix=1.0; } }
+        else { if(ps->gridWait){ ps->gridWait=0; ps->liveMix=1.0; }   /* switched to ASYNC mid-wait: go now */
+            grid*=pow(0.5,press);   /* ASYNC: pressure tightens the grid smoothly, 1/1 .. 1/2 */
+            ps->gSched+=1.0; fire=(ps->gSched>=grid); if(fire){ ps->gSched-=grid; if(ps->gSched>grid)ps->gSched=0.0; } }
+        if(fire){
             double var=(double)P[2];
             int cell=1+(int)(PRND(ps->gRng)*(1.0+var*7.0));            /* which earlier grid cell to quote */
             double pos=(double)ps->w-(double)cell*grid;
@@ -1766,21 +1909,39 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
             double pan=(ps->gIdx&1)?0.6:-0.6; ps->gIdx++;
             punch_grain(ps,pos,grid*0.95,rate,pan);
             if(ps->gPrime){ ps->gPrime=0; int gi=punch_grain(ps,pos-grid*0.475*rate,grid*0.95,rate,-pan); if(gi>=0)ps->gAge[gi]=grid*0.475; } }
-        double sl,sr; punch_grains_out(ps,&sl,&sr); *outL=sl; *outR=sr; return; }
+        double sl,sr; punch_grains_out(ps,&sl,&sr);
+        if(ps->gridWait){ sl=ps->inL; sr=ps->inR; }
+        else if(ps->liveMix>0.0){ sl+=(ps->inL-sl)*ps->liveMix; sr+=(ps->inR-sr)*ps->liveMix; ps->liveMix-=1.0/256.0; }
+        *outL=sl; *outR=sr; return; }
     if(d->mech==PM_STRUM){   /* arpeggiated grain cascade: P0=Rate P1=Dir/Range P2=Tone; pressure = faster + wider */
-        double ivl=(0.06+(1.0-(double)P[0])*0.4)*SR*(1.0-press*0.6);
-        ps->gSched+=1.0;
-        if(ps->gSched>=ivl){ ps->gSched-=ivl; if(ps->gSched>ivl)ps->gSched=0.0;
+        double ivl; int fire;
+        if(s->sync){   /* SYNC: Rate is a note value (1/4 .. 1/32, triplets included); pressure steps to faster ones; on the grid */
+            static const double SB[7]={1.0,2.0/3.0,0.5,1.0/3.0,0.25,1.0/6.0,0.125}; static const double PF[4]={1.0,0.75,0.55,0.4};
+            int ri=(int)lround((double)P[0]*6.0); if(ri<0)ri=0; if(ri>6)ri=6;
+            double beat=punch_beat(); ivl=nv_snap(SB[ri]*PF[press_step(&ps->pStep,press,4)],SB[ri])*beat;
+            long c=(long)floor(s->beatPos*beat/ivl);
+            if(ivl!=ps->gUnit){ ps->gUnit=ivl; ps->gCell=c; }
+            fire=(c!=ps->gCell); ps->gCell=c; if(fire&&ps->gridWait){ ps->gridWait=0; ps->liveMix=1.0; } }
+        else { if(ps->gridWait){ ps->gridWait=0; ps->liveMix=1.0; }
+            ivl=(0.06+(1.0-(double)P[0])*0.4)*SR*(1.0-press*0.6);
+            ps->gSched+=1.0; fire=(ps->gSched>=ivl);
+            if(fire){ ps->gSched-=ivl*(1.0+(PRND(ps->gRng)-0.5)*0.12*(0.3+press)); if(ps->gSched>ivl)ps->gSched=0.0; } }   /* ASYNC: a human hand - each stroke a little early or late, looser as you press */
+        if(fire){
             static const double up[4]={0,7,12,19}, dn[4]={0,-5,-12,-17};
             int k=ps->gIdx&3; double semis=((double)P[1]>=0.5)?up[k]:dn[k];
-            if(press>0.7) semis+=((double)P[1]>=0.5)?12.0:-12.0;
+            if(s->sync){ if(press>0.7) semis+=((double)P[1]>=0.5)?12.0:-12.0; }
+            else { double oc=(press-0.4)/0.5; oc=oc<0?0:(oc>1?1:oc); oc=oc*oc*(3.0-2.0*oc);   /* ASYNC: the octave creeps in with pressure, stroke by stroke */
+                   if(PRND(ps->gRng)<oc) semis+=((double)P[1]>=0.5)?12.0:-12.0; }
             double rate=pow(2.0,semis/12.0);
             double pos=(double)ps->w-ivl*2.0-200.0; if(rate>1.0) pos-=ivl*rate;   /* faster reads need more room */
             double pan=-0.7+(double)k/3.0*1.4;
             punch_grain(ps,pos,ivl*1.6,rate,pan); ps->gIdx++;
             if(ps->gPrime){ ps->gPrime=0; int gi=punch_grain(ps,pos-ivl*0.8*rate,ivl*1.6,rate,pan); if(gi>=0)ps->gAge[gi]=ivl*0.8; } }
         double sl,sr; punch_grains_out(ps,&sl,&sr);
-        if(toneOn){ sl=bq_L(&ps->toneFilt,sl); sr=bq_R(&ps->toneFilt,sr); } *outL=sl; *outR=sr; return; }
+        if(toneOn){ sl=bq_L(&ps->toneFilt,sl); sr=bq_R(&ps->toneFilt,sr); }
+        if(ps->gridWait){ sl=ps->inL; sr=ps->inR; }
+        else if(ps->liveMix>0.0){ sl+=(ps->inL-sl)*ps->liveMix; sr+=(ps->inR-sr)*ps->liveMix; ps->liveMix-=1.0/256.0; }
+        *outL=sl; *outR=sr; return; }
     if(d->mech==PM_STRETCH){   /* Freeze/Stretch as a lush multi-grain wash: FOUR grains, each with a
                                 * randomised length and (as the hold approaches freeze) a read position that
                                 * wanders backward through the held 2 s ring, given its own stereo place and a
@@ -1851,16 +2012,31 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
     /* Target slice length from the knob + pressure; the length IN USE (elCur) only
      * changes when a slice wraps, where the edge fade already sits at zero - so
      * pressure sweeps the repeat rate continuously (no stairs) and never mid-slice. */
+    if(ps->gridWait>0){   /* SYNC: live until the grid line, then cut the slice that just played */
+        if(--ps->gridWait>0){ *outL=ps->inL; *outR=ps->inR; return; }
+        punch_slice_arm(s,ps,d,P,punch_beat(),1); }
     double elT=ps->sliceLen;
-    if(d->mech==PM_REPEAT)       elT=ps->sliceLen*pow(0.5,press*2.0);       /* 1/1 .. 1/4, continuous */
-    else if(d->mech==PM_REVERSE) elT=ps->sliceLen*(1.0-press*0.6);
-    else if(d->mech==PM_CHOP)    elT=ps->sliceLen*(press>0.5?0.5:1.0);      /* rhythmic: stays on the grid */
+    if(s->sync){   /* SYNC: pressure steps through grid subdivisions */
+        if(d->mech==PM_REPEAT){ static const double RF[4]={1.0,0.5,1.0/3.0,0.25}; elT=ps->sliceLen*RF[press_step(&ps->pStep,press,4)]; }   /* 1 -> 1/2 -> 1/3 -> 1/4 */
+        else if(d->mech==PM_REVERSE){ static const double PF[4]={1.0,0.75,0.55,0.4}; double beat=punch_beat();
+            elT=rev_el(nv_snap(ps->fullT/beat*PF[press_step(&ps->pStep,press,4)],ps->fullT/beat)*beat); }   /* shorter note values */
+        else if(d->mech==PM_CHOP) elT=ps->sliceLen*(press_step(&ps->pStep,press,2)?0.5:1.0); }
+    else {         /* ASYNC: continuous - the rate follows the finger */
+        if(d->mech==PM_REPEAT)       elT=ps->sliceLen*pow(0.5,press*2.0);   /* 1/1 .. 1/4 */
+        else if(d->mech==PM_REVERSE) elT=ps->sliceLen*(1.0-press*0.6);
+        else if(d->mech==PM_CHOP)    elT=ps->sliceLen*pow(0.5,press); }     /* 1/1 .. 1/2 */
     if(elT<128.0)elT=128.0;
+    /* SYNC keeps the repeats on the grid: a new subdivision only takes over on a FULL slice line (where every
+     * subdivision meets). A pitched or gliding repeat has left the grid anyway, so those latch at any wrap. */
+    int onFull=1;
+    if(s->sync && d->mech!=PM_GLIDE && fabs(pm-1.0)<0.001 && ps->sliceStartT<0.0 && ps->fullT>0.0){
+        double r=fmod(ps->runT+1.0,ps->fullT); onFull=(r<3.0||ps->fullT-r<3.0); }
+    ps->runT+=1.0;
     if(ps->elCur<=0.0)ps->elCur=elT;
     if(ps->readPhase>=ps->elCur)ps->readPhase=ps->elCur-1.0;   /* guard: the fade below must never see a negative e */
     if(ps->readPhase<0.0)ps->readPhase=0.0;
     double pos, pos2=-1.0, xf=0.0, gate=1.0, bf=1.0, el=ps->elCur;
-    #define PUNCH_LATCH() do{ ps->elCur=elT; el=elT; if(ps->sliceStartT>=0.0){ ps->sliceStart=ps->sliceStartT; ps->sliceStartT=-1.0; } }while(0)
+    #define PUNCH_LATCH() do{ if(onFull){ ps->elCur=elT; el=elT; } if(ps->sliceStartT>=0.0){ ps->sliceStart=ps->sliceStartT; ps->sliceStartT=-1.0; ps->runT=0.0; } }while(0)
     if(d->mech==PM_REPEAT){
         pos=ps->sliceStart+ps->readPhase; ps->readPhase+=pm;
         if(ps->readPhase>=el){ ps->readPhase-=el; PUNCH_LATCH(); while(ps->readPhase>=el)ps->readPhase-=el; } }
@@ -1905,6 +2081,7 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
     punch_autopan(cyc,0.7,&l,&r);
     if(toneOn){ l=bq_L(&ps->toneFilt,l); r=bq_R(&ps->toneFilt,r); }
     if(d->mech==PM_CHOP) punch_doubler(ps,&l,&r);   /* stereo width */
+    if(ps->liveMix>0.0){ l+=(ps->inL-l)*ps->liveMix; r+=(ps->inR-r)*ps->liveMix; ps->liveMix-=1.0/256.0; }   /* SYNC: out of the live audio in ~6 ms */
     *outL=l; *outR=r;
 }
 
@@ -1919,9 +2096,9 @@ static inline void vbuf_read(Voice *v,double ph,double *l,double *r){
  * heads 1-3 through their own 64-sample crossfade from the old position. */
 static inline void head_jump(Voice *v, int k, double d){
     double L=(double)v->loopLen; if(L<1.0)return;
-    if(k==0){ v->scatXfadePhase=v->playPhase; v->scatXfade=64; v->playPhase+=d;
+    if(k==0){ v->scatXfadePhase=v->playPhase; v->scatXfade=XF_N; v->playPhase+=d;
         while(v->playPhase>=L)v->playPhase-=L; while(v->playPhase<0.0)v->playPhase+=L; return; }
-    Playhead *P=&v->ph[k]; P->xfPhase=P->phase; P->xf=64; P->phase+=d;
+    Playhead *P=&v->ph[k]; P->xfPhase=P->phase; P->xf=XF_N; P->phase+=d;
     while(P->phase>=L)P->phase-=L; while(P->phase<0.0)P->phase+=L;
 }
 /* ---- Voice Render (stereo) ---- */
@@ -1996,19 +2173,29 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
     int playing=(v->state==VS_PLAYING||v->state==VS_OVERDUBBING);
     int scrubbing=(v->scrubTimer>0)||(v->scrubMix>0.0005f);
     int LEN=__atomic_load_n(&v->loopLen,__ATOMIC_ACQUIRE);
-    int effStart=(int)(v->loopStart*(float)LEN); if(effStart<0)effStart=0; if(effStart>LEN-1)effStart=LEN-1;
+    /* The window GLIDES (~7.5 ms) instead of jumping per detent: a teleported window moved the
+     * playhead's position relative to it - the edge-fade gain jumped, and a window leaping past the
+     * head wrapped it instantly mid-signal: clicks when scrubbing Start. Sliding, every edge is
+     * crossed inside its fade. A new recording (length change) snaps. */
+    { double tS=(double)v->loopStart*(double)LEN, tL=(double)v->loopEnd*(double)LEN;
+      if(v->winLEN!=LEN){ v->winS=tS; v->winL=tL; v->winLEN=LEN; }
+      v->winS+=(tS-v->winS)*0.003; v->winL+=(tL-v->winL)*0.003; }
+    int effStart=(int)v->winS; if(effStart<0)effStart=0; if(effStart>LEN-1)effStart=LEN-1;
     int avail=LEN-effStart; if(avail<1)avail=1;                        /* End is loop LENGTH from Start */
-    int effLen=(int)(v->loopEnd*(float)avail); if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;
+    /* End is a LENGTH - a fraction of the whole loop, clamped to what is left after Start - so a
+     * window keeps its size while Start slides it through the sample (0.9.2; it used to be a
+     * fraction of what was left, which shrank the window as Start moved right). */
+    int effLen=(int)v->winL; if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;
     int effEnd=effStart+effLen;
     if(v->retrigPend){   /* un-pause = restart from Start. Heads 1-3 run at their own mult and
                           * diverge permanently, so this is also the only way to re-phase a voice.
                           * Declick through the existing jump crossfades: ampRel reaches 5 s, so a
                           * quick pause/un-pause can land here while playEnv is still ringing. */
         v->retrigPend=0;
-        v->scatXfadePhase=v->playPhase; v->scatXfade=64;
+        v->scatXfadePhase=v->playPhase; v->scatXfade=XF_N;
         v->playPhase=(double)effStart; v->playHead=effStart; v->ph[0].dir=1;
         for(int k=1;k<4;k++){ Playhead *P=&v->ph[k];
-            P->xfPhase=P->phase; P->xf=64; P->phase=(double)effStart; P->dir=1; }
+            P->xfPhase=P->phase; P->xf=XF_N; P->phase=(double)effStart; P->dir=1; }
         v->glLastSlice=-1;   /* Seed: don't let the slice tracker overwrite our crossfade */
     }
     /* voice_render runs per SAMPLE, so these three transcendentals were being evaluated
@@ -2016,7 +2203,11 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
      * inputs. pow() is strictly positive and cos^2+sin^2=1 (so the pan pair is never both
      * zero), which makes a zeroed field an unambiguous "never computed" - no init needed. */
     if(v->pitchPow<=0.0||v->pitchPowCache!=v->pitch){ v->pitchPow=pow(2.0,(double)v->pitch); v->pitchPowCache=v->pitch; }
-    double rate=v->pitchPow*s->tapeSpd;if(v->reverse>0.5f)rate=-rate;
+    /* SYNC follows Move's tempo tape-style: speed (and pitch) scale by now/recorded tempo, glided ~110 ms
+     * so a tempo change or a mode switch is a smooth tape bend, never a step. ASYNC glides back to 1. */
+    { double tg=(s->sync&&v->recBpm>1.0)?s->bpm/v->recBpm:1.0; if(tg<0.25)tg=0.25; if(tg>4.0)tg=4.0;
+      if(v->tempoSm<=0.0)v->tempoSm=1.0; v->tempoSm+=(tg-v->tempoSm)*0.0002; }
+    double rate=v->pitchPow*s->tapeSpd*v->tempoSm;if(v->reverse>0.5f)rate=-rate;
     /* Perform: Scan - a tape fast-forward, so pitch rides with speed. 2.0x is exactly one
      * octave; the old 3.5x was 1.807 octaves, landing 2.3 semitones short of two and
      * reading as a near-miss rather than a deliberate interval. */
@@ -2043,9 +2234,10 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
     double baseRate=rate;
     if(playing && v->scatter>0.01f){ if(--v->scatterCnt<=0){
         int slices=4+(int)(v->scatter*12.0f); int sliceLen=effLen/slices; if(sliceLen<256)sliceLen=256;
+        if(s->sync){ double g=loop_beatS(s,v)*0.25; int k=(int)((double)sliceLen/g+0.5); if(k<1)k=1; sliceLen=(int)(k*g); if(sliceLen<256)sliceLen=256; }   /* slices on the 1/16 grid */
         v->scatterCnt=sliceLen;
         if((lb_rand(&v->rng)*0.5+0.5)<(double)v->scatter){ int sl=(int)((lb_rand(&v->rng)*0.5+0.5)*(double)slices); if(sl>=slices)sl=slices-1;
-            v->scatXfadePhase=v->playPhase; v->scatXfade=64;   /* crossfade out of the old position */
+            v->scatXfadePhase=v->playPhase; v->scatXfade=XF_N;   /* crossfade out of the old position */
             v->playPhase=(double)(effStart+sl*sliceLen); } } }
     /* Seed: a knob move used to rewrite glOrder/glRev IMMEDIATELY, which re-mapped the slice
      * that was mid-playback - the read position jumped and it clicked on every new seed.
@@ -2059,16 +2251,16 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
     while(relPhase<0)relPhase+=(double)effLen;while(relPhase>=(double)effLen)relPhase-=(double)effLen;
     double boundRel=relPhase;   /* linear phase for the loop-boundary fade (pre-remap) */
     if(glOn && playing && v->glN>0){   /* Seed: play slices in a seeded order (some reversed) */
-        int gN=v->glN; while(gN>2 && effLen/gN<128) gN>>=1;   /* keep slice >= ~3ms so edges can crossfade */
+        int gN=v->glN; while(gN>2 && effLen/gN<XF_N) gN>>=1;   /* keep a slice at least one crossfade long */
         double sl=(double)effLen/(double)gN; int slice=(int)(relPhase/sl);
         if(slice<0)slice=0; if(slice>=gN)slice=gN-1;
         double within=relPhase-(double)slice*sl; int mapped=v->glOrder[slice]%gN;
         double mRel=v->glRev[slice]?((double)mapped*sl+(sl-1.0-within)):((double)mapped*sl+within);
         if(slice!=v->glLastSlice){
-            if(v->glLastSlice>=0){ v->scatXfadePhase=v->glPrevAbs; v->scatXfade=64; }
+            if(v->glLastSlice>=0){ v->scatXfadePhase=v->glPrevAbs; v->scatXfade=XF_N; }
             if(v->glRegenPend){   /* swap the pattern here, under cover of that crossfade */
                 int keep=v->glLastSlice; glitch_regen(v); v->glLastSlice=keep; v->glRegenPend=0;
-                gN=v->glN; while(gN>2 && effLen/gN<128) gN>>=1;
+                gN=v->glN; while(gN>2 && effLen/gN<XF_N) gN>>=1;
                 sl=(double)effLen/(double)gN; slice=(int)(relPhase/sl);
                 if(slice<0)slice=0; if(slice>=gN)slice=gN-1;
                 within=relPhase-(double)slice*sl; mapped=v->glOrder[slice]%gN;
@@ -2083,7 +2275,7 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
     if(v->scatXfade>0){   /* raised-cosine crossfade from the pre-jump position (scatter declick) */
         double op=v->scatXfadePhase; while(op<0)op+=(double)LEN; while(op>=(double)LEN)op-=(double)LEN;
         double oL,oR; lb_loop_read(v->bufferL,v->bufferR,LEN,op,&oL,&oR);
-        double t=0.5-0.5*cos(M_PI*(1.0-(double)v->scatXfade/64.0));
+        double t=0.5-0.5*cos(M_PI*(1.0-(double)v->scatXfade/(double)XF_N));
         rawL=oL*(1.0-t)+rawL*t; rawR=oR*(1.0-t)+rawR*t;
         v->scatXfadePhase+=rate; v->scatXfade--; }
     voice_antiimage(v,0,baseRate,&rawL,&rawR);   /* head 0 reads at baseRate */
@@ -2094,13 +2286,15 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
      * release half of any pause) sound instantaneous no matter where the knob sat. */
     int moving=playing||scrubbing||(v->playEnv>0.0005);
     if(moving){ v->playPhase+=rate;double dEnd=(double)effEnd,dStart=(double)effStart;
-        if(v->ph[0].mode==3&&!scrubbing){ if(v->playPhase>=dEnd){v->playPhase=dEnd-1.0;v->ph[0].dir=-1;}
-            else if(v->playPhase<dStart){v->playPhase=dStart;v->ph[0].dir=1;} }
+        /* Ping: REFLECT by the overshoot (was a clamp to the edge: a jump of up to 4 samples at 4x) */
+        if(v->ph[0].mode==3&&!scrubbing){ if(v->playPhase>=dEnd){v->playPhase=2.0*(dEnd-1.0)-v->playPhase; if(v->playPhase<dStart)v->playPhase=dStart; v->ph[0].dir=-1;}
+            else if(v->playPhase<dStart){v->playPhase=2.0*dStart-v->playPhase; if(v->playPhase>=dEnd)v->playPhase=dEnd-1.0; v->ph[0].dir=1;} }
         else { while(v->playPhase>=dEnd)v->playPhase-=(double)effLen;while(v->playPhase<dStart)v->playPhase+=(double)effLen; }
         if(v->ph[0].mode==4&&!scrubbing){ if(--v->ph[0].jumpCd<=0){         /* Jump: forward with periodic random leaps */
-            v->ph[0].jumpCd=(int)(SR*(0.06+0.5*(lb_rand(&v->rng)*0.5+0.5)));
-            v->scatXfadePhase=v->playPhase; v->scatXfade=64;                 /* declick the leap */
-            v->playPhase=dStart+(lb_rand(&v->rng)*0.5+0.5)*(double)effLen;
+            v->ph[0].jumpCd=s->sync?(int)(sync_beatS(s)*0.25*(1+(int)((lb_rand(&v->rng)*0.5+0.5)*7.999))):(int)(SR*(0.06+0.5*(lb_rand(&v->rng)*0.5+0.5)));   /* SYNC: 1-8 sixteenths */
+            v->scatXfadePhase=v->playPhase; v->scatXfade=XF_N;                 /* declick the leap */
+            if(s->sync){ double g=loop_beatS(s,v)*0.25; int n16=(int)((double)effLen/g); if(n16<1)n16=1; v->playPhase=dStart+(double)(int)((lb_rand(&v->rng)*0.5+0.5)*(n16-0.001))*g; }   /* onto a 1/16 */
+            else v->playPhase=dStart+(lb_rand(&v->rng)*0.5+0.5)*(double)effLen;
             while(v->playPhase>=dEnd)v->playPhase-=(double)effLen; } }
         v->playHead=(int)v->playPhase; }
     /* Amp envelope: attack fades in on trigger/unmute, release fades out on mute/pause/stop.
@@ -2131,7 +2325,7 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         if(P->env<0.0005&&P->mode==0) continue;
         if(P->spd!=P->spdCache){ P->mult=0.25*pow(16.0,(double)P->spd); P->spdCache=P->spd; }
         double hl,hr; vbuf_read(v,P->phase,&hl,&hr);
-        if(P->xf>0){ double ol,orr; vbuf_read(v,P->xfPhase,&ol,&orr); double w=(double)P->xf/64.0;   /* jump crossfade */
+        if(P->xf>0){ double ol,orr; vbuf_read(v,P->xfPhase,&ol,&orr); double w=(double)P->xf/(double)XF_N;   /* jump crossfade */
             hl=hl*(1.0-w)+ol*w; hr=hr*(1.0-w)+orr*w;
             if(moving) P->xfPhase+=baseRate*P->mult*((P->mode==2)?-1.0:(P->mode==3)?(double)P->dir:1.0);
             P->xf--; }
@@ -2150,14 +2344,15 @@ static void voice_render(Voice *v, loopex_t *s, int n, double *outL, double *out
         if(moving){ double pr=baseRate*P->mult;   /* heads 1-3 roll through the release too */
             if(P->mode==2) pr=-pr; else if(P->mode==3) pr*=(double)P->dir;
             P->phase+=pr;
-            if(P->mode==3){ if(P->phase>=(double)effEnd){P->phase=(double)effEnd-1.0;P->dir=-1;}
-                            else if(P->phase<(double)effStart){P->phase=(double)effStart;P->dir=1;} }
+            if(P->mode==3){ if(P->phase>=(double)effEnd){P->phase=2.0*((double)effEnd-1.0)-P->phase; if(P->phase<(double)effStart)P->phase=(double)effStart; P->dir=-1;}   /* reflect */
+                            else if(P->phase<(double)effStart){P->phase=2.0*(double)effStart-P->phase; if(P->phase>=(double)effEnd)P->phase=(double)effEnd-1.0; P->dir=1;} }
             else { while(P->phase>=(double)effEnd)P->phase-=(double)effLen;
                    while(P->phase<(double)effStart)P->phase+=(double)effLen; }
             if(P->mode==4){ if(--P->jumpCd<=0){                              /* Jump: periodic random leaps */
-                P->jumpCd=(int)(SR*(0.06+0.5*(lb_rand(&v->rng)*0.5+0.5)));
-                P->xfPhase=P->phase; P->xf=64;
-                P->phase=(double)effStart+(lb_rand(&v->rng)*0.5+0.5)*(double)effLen;
+                P->jumpCd=s->sync?(int)(sync_beatS(s)*0.25*(1+(int)((lb_rand(&v->rng)*0.5+0.5)*7.999))):(int)(SR*(0.06+0.5*(lb_rand(&v->rng)*0.5+0.5)));
+                P->xfPhase=P->phase; P->xf=XF_N;
+                if(s->sync){ double g=loop_beatS(s,v)*0.25; int n16=(int)((double)effLen/g); if(n16<1)n16=1; P->phase=(double)effStart+(double)(int)((lb_rand(&v->rng)*0.5+0.5)*(n16-0.001))*g; }
+                else P->phase=(double)effStart+(lb_rand(&v->rng)*0.5+0.5)*(double)effLen;
                 while(P->phase>=(double)effEnd)P->phase-=(double)effLen; } } } }
     if(envSum>1.0){ double nrm=1.0/sqrt(envSum); rawL*=nrm; rawR*=nrm; }   /* keep level sane as heads stack */
     /* Pitch (P2 knob 1): Signalsmith Stretch, independent of the playback rate.
@@ -2278,7 +2473,7 @@ static inline void poly_sample(loopex_t *s, double *mixL, double *mixR, double *
         Voice *lp=&s->voice[pv->loopIdx]; if(lp->loopLen<=0){pv->active=0;continue;}
         int effStart=(int)(lp->loopStart*(float)lp->loopLen); if(effStart<0)effStart=0; if(effStart>lp->loopLen-1)effStart=lp->loopLen-1;
         int avail=lp->loopLen-effStart; if(avail<1)avail=1;
-        int effLen=(int)(lp->loopEnd*(float)avail); if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;
+        int effLen=(int)((double)lp->loopEnd*(double)lp->loopLen); if(effLen<256)effLen=256; if(effLen>avail)effLen=avail;   /* End = length */
         int effEnd=effStart+effLen;
         while(pv->phase>=(double)effEnd)pv->phase-=(double)effLen; while(pv->phase<(double)effStart)pv->phase+=(double)effLen;
         double l,r;
@@ -2338,7 +2533,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     s->inLow=0.0f;s->inMid=0.0f;s->inMidFreq=0.5f;s->inHigh=0.0f;s->inHighFreq=0.748f;   /* 0.748 on the log sweep = 10 kHz, the 424's shelf */
     s->inLowFreq=0.39794f;   /* 40*10^0.398 = 100 Hz, the 424's shelf */
     s->dynMode=0;s->dynSense=0.5f;s->dynSize=8;s->dynSpread=16;   /* defaults: Size = Free (record until quiet), Spread = all 16 pads */s->dynError=0.0f;s->dynSustain=1.0f;
-    s->dynRecVoice=-1;s->dynRecLeft=0;s->dynHold=0;s->dynOverwrite=0;s->dynWait=0;s->dynFull=0;s->dynArmed=0;s->dynCursor=0;s->dynClockLeft=1;s->dynCount=0;s->dynLastPad=-1;
+    s->dynRecVoice=-1;s->dynRecLeft=0;s->dynHold=0;s->dynRounded=0;s->dynOverwrite=0;s->dynWait=0;s->dynFull=0;s->clkTick=0;s->clkAge=1<<29;s->clkFire=0;s->clkSeenStart=0;s->sync=0;s->bpm=120.0;s->beatPos=0.0;s->beatIdx=0;s->barIdx=0;s->startEvt=0;s->gridLocked=0;s->dynSizeS=4;s->dynClkIdx=-1;s->fx.syncIdx=-999999;s->dynSenseCache=-1.0f;s->dynThrCache=0.0;s->dynArmed=0;s->dynCursor=0;s->dynClockLeft=1;s->dynCount=0;s->dynLastPad=-1;
     bq_reset(&s->inEqLo);bq_reset(&s->inEqMid);bq_reset(&s->inEqHi);bq_reset(&s->inTapeLp);bq_reset(&s->inTapeHp);
     bq_reset(&s->inBump); s->bumpCache=-1.0f;
     s->busA=pfx_create(44100.0f); s->busB=pfx_create(44100.0f); s->punchFx=pfx_create(44100.0f);
@@ -2429,7 +2624,18 @@ static void destroy_instance(void *inst){loopex_t *s=(loopex_t*)inst;if(!s)retur
 
 /* ---- MIDI Handler ---- */
 static void on_midi(void *inst, const uint8_t *msg, int len, int source) {
-    loopex_t *s=(loopex_t*)inst;if(len<3)return;
+    loopex_t *s=(loopex_t*)inst;
+    if(len>=1 && msg[0]>=0xF8 && source!=MOVE_MIDI_SOURCE_INTERNAL){   /* Move's clock (24 per beat) for Dynamic > Clock */
+        if(msg[0]==0xF8){ s->clkTick++; s->clkAge=0;
+            if(s->gridLocked){ double e=(double)s->clkTick/24.0-s->beatPos; if(fabs(e)>0.25) s->beatPos+=e; else s->beatPos+=e*0.1; }   /* pull the grid onto Move */
+            long per=(long)(DYN_BEATS[dyn_size_idx(s)]*24.0+0.5); if(per<1)per=1;
+            if(s->clkTick%per==0) s->clkFire=1; }
+        else if(msg[0]==0xFA){ s->clkTick=0; s->clkSeenStart=1; s->clkAge=0; s->clkFire=1;   /* Start: bar 1, beat 1 */
+            s->beatPos=0.0; s->beatIdx=-1; s->barIdx=-1; s->gridLocked=1; s->startEvt=1; }
+        return; }
+    if(len<3)return;
+    if(msg[0]==0xF2){ long spp=(long)(msg[1]&0x7F)|((long)(msg[2]&0x7F)<<7);   /* Song Position (16ths): the bar without a Start */
+        s->beatPos=(double)spp/4.0; s->clkTick=spp*6; s->beatIdx=(long)floor(s->beatPos); s->barIdx=(long)floor(s->beatPos/4.0); s->gridLocked=1; s->clkSeenStart=1; return; }
     uint8_t status=msg[0]&0xF0,d1=msg[1],d2=msg[2];
 
     /* Overtake: internal pad/knob input is owned by ui.js, which drives the DSP
@@ -2515,8 +2721,13 @@ static inline void stumble_sample(loopex_t *s, double *mixL, double *mixR){
     if(s->stMix<=0.001f)return;
     s->stRingL[s->stW]=(float)*mixL; s->stRingR[s->stW]=(float)*mixR;
     if(--s->stStepLeft<=0){
-        int stepSamp=(int)((20.0+(double)s->stStep*980.0)*44.1); if(stepSamp<441)stepSamp=441; if(stepSamp>PUNCH_BUF/2)stepSamp=PUNCH_BUF/2;
-        s->stStepLen=stepSamp; s->stStepLeft=stepSamp; s->stStepPos=0;
+        int stepSamp=(int)((20.0+(double)s->stStep*980.0)*44.1);
+        int left=0;
+        if(s->sync){ static const double NB[9]={0.125,1.0/6.0,0.25,1.0/3.0,0.5,2.0/3.0,1.0,2.0,4.0};   /* 1/32 1/16T 1/16 1/8T 1/8 1/4T 1/4 1/2 1 bar */
+            int ni=(int)((double)s->stStep*8.999); if(ni<0)ni=0; if(ni>8)ni=8; double bs=sync_beatS(s);
+            stepSamp=(int)(NB[ni]*bs); double ph=fmod(s->beatPos,NB[ni]); left=(int)((NB[ni]-ph)*bs); }   /* on the grid */
+        if(stepSamp<441)stepSamp=441; if(stepSamp>PUNCH_BUF/2)stepSamp=PUNCH_BUF/2; if(left<64||left>stepSamp)left=stepSamp;
+        s->stStepLen=stepSamp; s->stStepLeft=left; s->stStepPos=0;
         s->stActive = (PRND(s->stRng) < (double)s->stOdds);
         if(s->stActive){
             s->stEffect = (s->stKind==0)? (int)(PRND(s->stRng)*4.0) : (s->stKind-1); if(s->stEffect>4)s->stEffect=4; if(s->stEffect<0)s->stEffect=0;   /* Random picks the 4 slice glitches, not the bitcrush */
@@ -2722,7 +2933,9 @@ static inline void perf_pump(loopex_t *s, double *l, double *r){
     if(s->perfTrem<0.002f) return;
     int di=(int)((double)s->perfTremRate*5.99); if(di<0)di=0; if(di>5)di=5;
     double period=punch_beat()*PUMP_DIV[di]; if(period<64.0)period=64.0;
-    s->tremPh += 1.0/period; while(s->tremPh>=1.0)s->tremPh-=1.0;
+    s->tremPh += 1.0/period;
+    if(s->sync){ double tgt=fmod(s->beatPos*punch_beat()/period,1.0), e=tgt-s->tremPh; e-=floor(e+0.5); s->tremPh+=e*0.0005; }   /* SYNC: slew onto the grid - never a jump */
+    while(s->tremPh>=1.0)s->tremPh-=1.0; while(s->tremPh<0.0)s->tremPh+=1.0;
     double d=(double)s->perfTrem;
     /* Duck deepest at the downbeat (phase 0), recover over the cycle, then a short
      * smoothstep attack ducks back down just before the wrap. Both ends of the cycle
@@ -3061,6 +3274,8 @@ static inline void drift_sample(loopex_t *s, double *l, double *r){
     double yL[DRIFT_N], yR[DRIFT_N];
     double tapFrac = 0.12 + 0.80*(double)size;
     double baseRate = (0.05 + 0.9*(double)rate)/(double)SR;
+    if(s->sync){ static const double PB[8]={32,16,8,4,2,1,0.5,0.25}; int ri=(int)((double)rate*7.999); if(ri<0)ri=0; if(ri>7)ri=7;   /* 8 bars .. 1/16 per cycle */
+        baseRate=1.0/(PB[ri]*sync_beatS(s)); }
     for(int i=0;i<DRIFT_N;i++){
         int len=s->drLen[i];
         s->drPh[i]+= baseRate*(1.0+0.137*i); if(s->drPh[i]>=1.0)s->drPh[i]-=1.0;
@@ -3126,7 +3341,9 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     uint64_t _pc=lb_cyc();
     /* A finished session load hands back a settings blob — apply it here (bounded
      * string parse, no I/O), once, at block start. */
-    if(atomic_load(&s->sio.applyState)){ atomic_store(&s->sio.applyState,0); set_param(s,"state",s->sio.stateBuf); }
+    if(atomic_load(&s->sio.applyState)){ atomic_store(&s->sio.applyState,0); set_param(s,"state",s->sio.stateBuf);
+        if(!atomic_load(&s->undoReq)){ s->histN=0; s->odRec=-1; }
+        if(s->dynMode!=0) set_param(s,"dynMode","Off"); }   /* a loaded session never starts sampling by itself: its Dynamic knobs come back, the sampler stays off */   /* a loaded session starts a fresh history: Undo must not put the last session's audio on its pads */
     int16_t *micBuf=NULL,*mixBuf=NULL;
     if(g_host&&g_host->mapped_memory){ micBuf=(int16_t*)(g_host->mapped_memory+g_host->audio_in_offset);
         mixBuf=(int16_t*)(g_host->mapped_memory+g_host->audio_out_offset); }
@@ -3186,8 +3403,10 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     input_eq_update(s);   /* record-chain EQ + tape-speed */
     punch_prep(s);   /* per-block: punch slot tone-filter coeffs */
     fxseq_tick(s,frames);   /* FX sequencer: step clock, chance, gate */
+    if(s->clkAge<(1<<29)) s->clkAge+=frames;   /* samples since Move's last clock tick */
+    { double b=(g_host&&g_host->get_bpm)?(double)g_host->get_bpm():120.0; if(b<20.0||b>400.0)b=120.0; s->bpm=b; }
     for(int vi=0;vi<NUM_VOICES;vi++){ Voice *v=&s->voice[vi];   /* Dynamic Sustain: a capture's time is up -> pause, its Decay fades it */
-        if(v->dynDie>0){ v->dynDie-=frames; if(v->dynDie<=0){ v->dynDie=0; if(v->state==VS_PLAYING) v->state=VS_PAUSED; } } }
+        if(v->dynDie>0){ v->dynDie-=frames; if(v->dynDie<=0){ v->dynDie=0; if(v->state==VS_PLAYING){ v->state=VS_PAUSED; v->dynSpent=1; if(s->dynWait){ s->dynWait=0; s->dynFull=0; } } } } }   /* a freed pad wakes a parked sampler */   /* spent: free for the next capture */
 
     PROF(0);
     for(int n=0;n<frames;n++){
@@ -3264,17 +3483,22 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         if(fabs(s->inHigh)>0.007f){inL=bq_L(&s->inEqHi,inL);inR=bq_R(&s->inEqHi,inR);}
         int16_t inSL=(int16_t)lb_clampd(inL*32767.0,-32767.0,32767.0);
         int16_t inSR=(int16_t)lb_clampd(inR*32767.0,-32767.0,32767.0);
+        s->dynPreL[s->dynPreW]=inSL; s->dynPreR[s->dynPreW]=inSR; if(++s->dynPreW>=DYN_PRE)s->dynPreW=0;   /* 100 ms of input history, always: SYNC late taps + Dynamic pre-roll */
+        { s->beatPos+=s->bpm/(60.0*SR); long bi=(long)floor(s->beatPos), br=(long)floor(s->beatPos/4.0);
+          int be=(bi!=s->beatIdx), ba=(br!=s->barIdx); s->beatIdx=bi; s->barIdx=br;
+          if(be||ba||s->startEvt) sync_events(s,be,ba); }
         if(s->dynMode>0||s->dynRecVoice>=0) dyn_sample(s,inSL,inSR);   /* Dynamic sampler: may open or close a recording */
 
         /* Threshold-armed record: an armed track starts the moment input crosses. */
         { double lvl=fabs(inL)>fabs(inR)?fabs(inL):fabs(inR);
           if(lvl>(double)s->armThresh){
             for(int vi=0;vi<NUM_VOICES;vi++){ Voice *v=&s->voice[vi];
-                if(v->armed){ v->armed=0; v->state=VS_RECORDING; v->recHead=0; v->loopLen=0; wear_zero(v); } } } }
+                if(v->armed){ v->armed=0; if(s->sync) v->syncPend=1; else sync_rec_begin(s,v,0); } } } }   /* SYNC: the crossing arms the next beat */
         PROF(1);
         for(int vi=0;vi<NUM_VOICES;vi++){Voice *v=&s->voice[vi];
             if(v->state==VS_RECORDING){if(v->recHead<LOOP_SAMPLES){v->bufferL[v->recHead]=inSL;v->bufferR[v->recHead]=inSR;v->recHead++;}
-                if(v->recHead>=LOOP_SAMPLES){v->loopLen=LOOP_SAMPLES;v->playHead=0;v->playPhase=0.0;v->state=VS_PLAYING;}}
+                if(v->recTarget>0 && v->recHead>=v->recTarget){ v->loopLen=v->recTarget; v->recTarget=0; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING; }   /* SYNC: the bar line */
+                else if(v->recHead>=LOOP_SAMPLES){v->loopLen=LOOP_SAMPLES;v->recTarget=0;v->playHead=0;v->playPhase=0.0;v->state=VS_PLAYING;}}
             else if(v->state==VS_OVERDUBBING){ v->dubSamples++;   /* cumulative dub time for the DUB readout */
               if(v->playHead<v->loopLen){
                 if(s->odRec>=0){ UndoRec *r=&s->hist[s->odRec];   /* save the original before it is overwritten (once per sample) */
@@ -3327,6 +3551,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
               if(ps->idx<0){ ps->ringL[ps->w]=(float)xl; ps->ringR[ps->w]=(float)xr; }   /* idle: cache the chain signal at this slot (no engage boundary) */
               else { int hold=punch_holds_ring(s,ps);
                   if(!hold){ ps->ringL[ps->w]=(float)xl; ps->ringR[ps->w]=(float)xr; }         /* active: capture chain input */
+                  ps->inL=xl; ps->inR=xr;   /* live input: SYNC waits play it until the grid line */
                   double wl,wr; punch_slot_process(s,ps,n,&wl,&wr);
                   /* Loudness match: windowed grains, gated hits and slice fades all lose level
                    * against the dry signal. Track both powers (~100 ms) and make the wet up,
@@ -3422,7 +3647,7 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
         long done=atomic_load_explicit(&v->qDone,memory_order_acquire);
         if(done>r){ int rs=(int)(r%PS_NQ);
             memcpy(v->psOutL,v->qOutL[rs],sizeof v->psOutL); memcpy(v->psOutR,v->qOutR[rs],sizeof v->psOutR); v->psLate=0; }
-        else { if(!v->psLate)v->psLateCount++; v->psLate=1; }   /* keep the last block; voice_render rides to dry */
+        else { if(!v->psLate){ v->psLateCount++; v->psLateRun=0; } v->psLate=1; if(++v->psLateRun>v->psLateMax)v->psLateMax=v->psLateRun; }   /* keep the last block; voice_render rides to dry */
       }
       if(any){ sem_post(&s->psSem[0]); sem_post(&s->psSem[1]); }
       s->blockNo=k+1; }
@@ -3458,6 +3683,7 @@ static const char *preamp_opts[]={"Tapeless","Clean","Cass1","Cass2","VHS1","VHS
 static const char *odmode_opts[]={"Replace","Multiply","Disint"};
 static const char *insrc_opts[]={"Line","Master","S1","S2","S3","S4","M1","M2","M3","M4","Self"};
 static const char *inchan_opts[]={"Stereo","Left","Right","Sum"};
+static const char *sync_opts[]={"ASYNC","SYNC"};
 static const char *dynmode_opts[]={"Off","Level","Onset","Phrase","Pitch","Novelty","Clock"};
 static const char *dynsize_opts[]={"1/16","1/8","1/4","1/2","1 bar","2 bars","4 bars","8 bars","Free"};
 static const char *midiin_opts[]={"Off","Keys","Ctrl"};   /* external MIDI: ignore / keyboard poly / LCXL control */
@@ -3469,17 +3695,31 @@ static int match_enum(const char *value, const char **opts, int count){for(int i
 /* Single-tap gesture: cycle Empty->Rec->Play<->Pause; from Odub -> Play. */
 static void voice_tap(loopex_t *s, int vi) {
     if(vi<0||vi>=NUM_VOICES)return; Voice *v=&s->voice[vi]; s->selTrack=vi+1;
+    v->dynDie=0; v->dynSpent=0;   /* your tap makes the pad yours: no Sustain timer, not free for the sampler */
     switch(v->state){
-    case VS_EMPTY: v->state=VS_RECORDING; v->recHead=0; v->loopLen=0; v->disintGen=0; wear_zero(v); break;   /* fresh take: Disint starts gentle again */
-    case VS_RECORDING: v->loopLen=v->recHead; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING; break;
-    case VS_PLAYING: v->state=VS_PAUSED; break;
-    case VS_PAUSED: v->state=VS_PLAYING; v->retrigPend=1; break;   /* un-pause restarts from Start, not where it froze */
+    case VS_EMPTY:
+        if(s->sync){   /* SYNC: on the next beat - or now, if the tap came just after one (up to 1/8 beat late, taken from the input history) */
+            if(v->syncPend==1){ v->syncPend=0; break; }   /* a second tap cancels */
+            double bs=sync_beatS(s); int late=(int)((s->beatPos-floor(s->beatPos))*bs);
+            if(late<=(int)(bs*0.125) && late<DYN_PRE-1) sync_rec_begin(s,v,late); else v->syncPend=1;
+            break; }
+        sync_rec_begin(s,v,0); break;   /* fresh take: Disint starts gentle again */
+    case VS_RECORDING:
+        if(s->sync){ int t=sync_round_len(s,v->recHead);   /* SYNC: whole bars - keep going to the bar line, or trim */
+            if(v->recTarget>0 || t<=v->recHead){ if(t>v->recHead)t=v->recHead; v->recTarget=0; v->loopLen=t; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING; }
+            else v->recTarget=t;
+            break; }
+        v->loopLen=v->recHead; v->playHead=0; v->playPhase=0.0; v->state=VS_PLAYING; break;
+    case VS_PLAYING: v->state=VS_PAUSED; v->syncPend=0; break;
+    case VS_PAUSED: if(s->sync){ v->syncPend=(v->syncPend==2)?0:2; break; }   /* SYNC: back in on the next bar */
+        v->state=VS_PLAYING; v->retrigPend=1; break;   /* un-pause restarts from Start, not where it froze */
     case VS_OVERDUBBING: if((int)s->overdubMode==OD_DISINTEGRATION)atomic_store(&s->disintReq,vi+1); v->state=VS_PLAYING; break;
     }
 }
 /* Overdub gesture (double-tap): Play/Pause -> Overdub; Odub -> Play; Rec -> Play. */
 static void voice_odub(loopex_t *s, int vi) {
     if(vi<0||vi>=NUM_VOICES)return; Voice *v=&s->voice[vi]; s->selTrack=vi+1;
+    v->dynDie=0; v->dynSpent=0;
     switch(v->state){
     case VS_PLAYING: case VS_PAUSED: v->state=VS_OVERDUBBING; v->recHead=v->playHead; v->dubSamples=0;   /* DUB readout counts this pass */
         { s->histGroup++; UndoRec *r=undo_push(s,UR_OVERDUB,vi); r->len=v->loopLen; r->genCur++; if(!r->genCur)r->genCur=1; r->cur=r->genCur; s->odRec=(int)(r-s->hist); } break;   /* fresh undo point */
@@ -3511,6 +3751,14 @@ static void set_param(void *inst, const char *key, const char *val) {
             }
             p=(*eol)?eol+1:eol;
         }
+        /* A 0.9.1 state (no LowF knob yet): its LoCut and high-shelf corner were LINEAR sweeps and its low
+         * shelf sat at 120 Hz. Translate them onto 0.9.2's log knobs so an old set or session sounds the same. */
+        if(!strstr(val,"inLowFreq=")){ char b[32];
+            if(strstr(val,"tapeLoCut=")&&s->tapeLoCut>0.01f){ snprintf(b,sizeof b,"%.5f",log((20.0+(double)s->tapeLoCut*780.0)/20.0)/log(40.0)); set_param(inst,"tapeLoCut",b); }
+            if(strstr(val,"inHighFreq=")){ snprintf(b,sizeof b,"%.5f",log((3000.0+(double)s->inHighFreq*12000.0)/3000.0)/log(5.0)); set_param(inst,"inHighFreq",b); }
+            if(strstr(val,"inLow=")){ snprintf(b,sizeof b,"%.5f",log10(3.0)); set_param(inst,"inLowFreq",b); }   /* 40*10^0.477 = 120 Hz */
+            if(strstr(val,"v0.end="))   /* 0.9.1's End was a fraction of what was left after Start; now it is a length */
+                for(int i=0;i<NUM_VOICES;i++){ Voice *vv=&s->voice[i]; vv->loopEnd=lb_clampf(vv->loopEnd*(1.0f-vv->loopStart),0,1); } }
         return;
     }
     if(strcmp(key,"cmd")==0){
@@ -3635,11 +3883,17 @@ static void set_param(void *inst, const char *key, const char *val) {
     SETFR("inHigh",inHigh,-1.0,1.0) SETFR("inHighFreq",inHighFreq,0.0,1.0) SETFR("inLowFreq",inLowFreq,0.0,1.0)
     SETFR("dynSense",dynSense,0.0,1.0) SETFR("dynError",dynError,0.0,1.0) SETFR("dynSustain",dynSustain,0.0,1.0)
     if(strcmp(key,"dynMode")==0){ int i=match_enum(val,dynmode_opts,7); int nm=(i>=0)?i:(int)lb_clampf((float)atof(val),0,6);
-        if(nm!=s->dynMode){ s->dynOverwrite=0; s->dynWait=0; s->dynFull=0; }   /* a fresh start asks again before overwriting */
+        if(nm!=s->dynMode){ s->dynOverwrite=0; s->dynWait=0; s->dynFull=0; if(s->dynMode==0&&nm!=0){ s->dynBase=s->selTrack-1; s->dynCursor=0; } }   /* a fresh start asks again before overwriting */
         s->dynMode=nm; s->dynClockLeft=1; s->dynArmed=0; return; }
     if(strcmp(key,"dynOverwrite")==0){ s->dynOverwrite=(atof(val)>0.5); return; }
     if(strcmp(key,"dynResume")==0){ s->dynWait=0; s->dynFull=0; return; }
-    if(strcmp(key,"dynSize")==0){ int i=match_enum(val,dynsize_opts,9); s->dynSize=(i>=0)?i:(int)lb_clampf((float)atof(val),0,8); return; }
+    if(strcmp(key,"dynSize")==0){ int i=match_enum(val,dynsize_opts,9); i=(i>=0)?i:(int)lb_clampf((float)atof(val),0,8); if(s->sync)s->dynSizeS=i; else s->dynSize=i; return; }
+    if(strcmp(key,"dynSizeS")==0){ s->dynSizeS=(int)lb_clampf((float)atof(val),0,8); return; }   /* state restore of the SYNC Size */
+    if(strcmp(key,"dynSizeA")==0){ s->dynSize=(int)lb_clampf((float)atof(val),0,8); return; }    /* ...and of the ASYNC Size, whatever mode is on */
+    if(strcmp(key,"syncMode")==0){ int i=match_enum(val,sync_opts,2); int nv=(i>=0)?i:(atof(val)>0.5);
+        if(nv!=s->sync){ s->sync=nv; s->fx.syncIdx=-999999; s->dynClkIdx=-1; s->dynRounded=0;
+            if(!nv){ sync_events(s,1,1); for(int k=0;k<NUM_VOICES;k++) if(s->voice[k].recTarget>0) s->voice[k].recTarget=s->voice[k].recHead+1; } }   /* ASYNC: pending starts now, a take waiting for its bar line closes at once */
+        return; }
     if(strcmp(key,"dynSpread")==0){ s->dynSpread=(int)lb_clampf((float)atof(val),1,16); return; }
     SETFR("tapeNoise",tapeNoise,0.0,1.0) SETFR("tapeDrive",tapeDrive,0.0,1.0) SETFR("tapeHF",tapeHF,0.0,1.0)
     if(strcmp(key,"midiIn")==0){ int i=match_enum(val,midiin_opts,3); if(i<0)i=(strcmp(val,"On")==0)?1:(int)lb_clampf((float)atof(val),0,2); s->midiIn=i; return; }
@@ -3656,9 +3910,9 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"stKind")==0){int i=match_enum(val,stkind_opts,6); s->stKind=(i>=0)?i:(int)lb_clampf((float)atof(val),0.0f,5.0f); return;}
     if(strcmp(key,"jump")==0){ if((float)atof(val)>0.5f){ for(int i=0;i<NUM_VOICES;i++){Voice *v=&s->voice[i];
         if((v->state==VS_PLAYING||v->state==VS_OVERDUBBING)&&v->loopLen>0){ int es=(int)(v->loopStart*(float)v->loopLen); if(es<0)es=0; if(es>v->loopLen-1)es=v->loopLen-1;
-            int av=v->loopLen-es; if(av<1)av=1; int el=(int)(v->loopEnd*(float)av); if(el<256)el=256; if(el>av)el=av;
+            int av=v->loopLen-es; if(av<1)av=1; int el=(int)((double)v->loopEnd*(double)v->loopLen); if(el<256)el=256; if(el>av)el=av;   /* End = length */
             double frac=lb_rand(&v->rng)*0.5+0.5;
-            v->scatXfadePhase=v->playPhase; v->scatXfade=64;   /* declick the jump */
+            v->scatXfadePhase=v->playPhase; v->scatXfade=XF_N;   /* declick the jump */
             v->playPhase=(double)es+frac*(double)el; } } } return; }
     if(strcmp(key,"scan")==0){ if((float)atof(val)>0.5f)s->scanTimer=(int)(SR*0.4); return; }
     /* Jog scrub: nudge the selected loop's playhead, declicked by the scatter crossfade. */
@@ -3683,7 +3937,7 @@ static void set_param(void *inst, const char *key, const char *val) {
         const char *c=strchr(val,':'); int hi=atoi(val); double d=c?atof(c+1):0.0; if(d>100.0)d=100.0; if(d<-100.0)d=-100.0;
         if(hi<0||hi>3||v->loopLen<=0)return;
         double mv=d*(double)v->loopLen*0.01;
-        if(hi==0){ v->scatXfadePhase=v->playPhase; v->scatXfade=64; v->playPhase+=mv;
+        if(hi==0){ v->scatXfadePhase=v->playPhase; v->scatXfade=XF_N; v->playPhase+=mv;
             while(v->playPhase>=(double)v->loopLen)v->playPhase-=(double)v->loopLen;
             while(v->playPhase<0.0)v->playPhase+=(double)v->loopLen; }
         else head_jump(v,hi,mv);
@@ -3755,6 +4009,7 @@ static void set_param(void *inst, const char *key, const char *val) {
             else if(strcmp(sub,"rso")==0){vr->djReso=lb_clampf(fv,0,1);dj_filter_update(vr);}
             else if(strcmp(sub,"atk")==0)vr->ampAtk=lb_clampf(fv,0,1);
             else if(strcmp(sub,"wr")==0)vr->wear=lb_clampf(fv,0,1);
+            else if(strcmp(sub,"bpm")==0)vr->recBpm=(fv>20.0f&&fv<400.0f)?(double)fv:0.0;
             else if(strcmp(sub,"rel")==0)vr->ampRel=lb_clampf(fv,0,1);
             else if(strcmp(sub,"cmp")==0)vr->comp=lb_clampf(fv,0,1);
             else if(strcmp(sub,"pit2")==0)vr->clock=lb_clampf(fv,-2,2);   /* old "clk" (a rate) is ignored: not the same parameter any more */
@@ -3957,10 +4212,14 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
     GETP("stability",stability) GETP("globalWowFlut",globalWowFlut) GETP("inputMonitor",inputMonitor) GETP("inputGain",inputGain)
     GETP("inLow",inLow) GETP("inMid",inMid) GETP("inMidFreq",inMidFreq) GETP("inHigh",inHigh) GETP("inHighFreq",inHighFreq) GETP("inLowFreq",inLowFreq)
     GETP("dynSense",dynSense) GETP("dynError",dynError) GETP("dynSustain",dynSustain)
-    GETE("dynMode",dynMode,dynmode_opts,7); GETE("dynSize",dynSize,dynsize_opts,9);
+    GETE("dynMode",dynMode,dynmode_opts,7);
+    if(strcmp(key,"dynSize")==0){ int i=dyn_size_raw(s); if(i<0)i=0; if(i>8)i=8; return snprintf(buf,buf_len,"%s",dynsize_opts[i]); }
+    if(strcmp(key,"syncMode")==0) return snprintf(buf,buf_len,"%s",sync_opts[s->sync?1:0]);
+    if(strcmp(key,"syncPend")==0){ if(buf_len<NUM_VOICES+1)return -1; for(int i=0;i<NUM_VOICES;i++) buf[i]=(char)('0'+s->voice[i].syncPend); buf[NUM_VOICES]=0; return NUM_VOICES; }
     if(strcmp(key,"dynSpread")==0) return snprintf(buf,buf_len,"%d",s->dynSpread);
     if(strcmp(key,"dynCount")==0) return snprintf(buf,buf_len,"%ld,%d",s->dynCount,s->dynLastPad+1);   /* captures so far, last pad */
     if(strcmp(key,"dynFull")==0) return snprintf(buf,buf_len,"%d",s->dynFull);
+    if(strcmp(key,"clkInfo")==0) return snprintf(buf,buf_len,"%s tick=%ld start=%d",(s->clkAge<(int)(SR*0.5))?"live":"none",s->clkTick,s->clkSeenStart);
     if(strcmp(key,"dynOverwrite")==0||strcmp(key,"dynResume")==0) return snprintf(buf,buf_len,"%d",s->dynOverwrite);
     GETP("tapeNoise",tapeNoise) GETP("tapeDrive",tapeDrive) GETP("tapeHF",tapeHF)
     if(strcmp(key,"midiIn")==0){ int i=s->midiIn; if(i<0||i>2)i=0; return snprintf(buf,buf_len,"%s",midiin_opts[i]); }
@@ -3981,6 +4240,11 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
 
     int selIdx=s->selTrack-1;if(selIdx<0||selIdx>=NUM_VOICES)return -1;Voice *v=&s->voice[selIdx];
     GETVP7("v_start",loopStart) GETVP7("v_end",loopEnd)
+    if(strcmp(key,"v_grid")==0){ if(!s->sync||v->loopLen<=0) return snprintf(buf,buf_len,"0");
+        double bs=loop_beatS(s,v); return snprintf(buf,buf_len,"%.7f,%.7f",bs*0.25/(double)v->loopLen,bs*4.0/(double)v->loopLen); }
+    if(strcmp(key,"v_bars")==0){   /* length (or the running take) as bars.beats, for the SYNC header */
+        int L=(v->state==VS_RECORDING)?v->recHead:v->loopLen; double bs=(v->state==VS_RECORDING)?sync_beatS(s):loop_beatS(s,v);
+        int beats=(int)floor((double)L/bs+1e-6); return snprintf(buf,buf_len,"%d.%d",beats/4,beats%4); }
     if(strcmp(key,"v_reverse")==0){int _i=(int)roundf(v->reverse);if(_i<0)_i=0;if(_i>1)_i=1;return snprintf(buf,buf_len,"%s",reverse_opts[_i]);}
     GETVP("v_sat",saturation) GETVP("v_wowflut",wowFlutter)
     GETVP("v_sendA",send) GETVP("v_sendB",sendB) GETVP("v_scatter",scatter)
@@ -4039,7 +4303,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
         /* Input / Tape chain */
         WF("inLow",s->inLow);WF("inMid",s->inMid);WF("inMidFreq",s->inMidFreq);
         WF("inHigh",s->inHigh);WF("inHighFreq",s->inHighFreq);WF("inLowFreq",s->inLowFreq);
-        WI("dynMode",s->dynMode);WF("dynSense",s->dynSense);WI("dynSize",s->dynSize);WI("dynSpread",s->dynSpread);WF("dynError",s->dynError);WF("dynSustain",s->dynSustain);
+        WI("dynSizeA",s->dynSize);WI("syncMode",s->sync);WI("dynSizeS",s->dynSizeS);WI("dynMode",s->dynMode);WF("dynSense",s->dynSense);   /* dynSizeA: the ASYNC Size by name - "dynSize" means the CURRENT mode's Size */WI("dynSpread",s->dynSpread);WF("dynError",s->dynError);WF("dynSustain",s->dynSustain);
         WF("tapeNoise",s->tapeNoise);WF("tapeDrive",s->tapeDrive);WF("tapeHF",s->tapeHF);
         WI("midiIn",s->midiIn);WI("midiOut",s->midiOut);WF("armThresh",s->armThresh);WF("tapeLoCut",s->tapeLoCut);WF("tapeWow",s->tapeWow);WF("tapeFlut",s->tapeFlut);WF("tapeGen",s->tapeGen);
         /* Master + keyboard */
@@ -4066,6 +4330,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
                 i,(double)vi->pitch,i,(double)vi->filter,i,(double)vi->pan,i,(double)vi->volume,i,(double)vi->decay);
             APP("v%d.rso=%.4f\nv%d.atk=%.4f\nv%d.rel=%.4f\n",i,(double)vi->djReso,i,(double)vi->ampAtk,i,(double)vi->ampRel);
             if(vi->wear>0.0f) APP("v%d.wr=%.4f\n",i,(double)vi->wear);
+            if(vi->recBpm>1.0) APP("v%d.bpm=%.3f\n",i,vi->recBpm);
             APP("v%d.cmp=%.4f\nv%d.pit2=%.4f\n",i,(double)vi->comp,i,(double)vi->clock);
             APP("v%d.sdB=%.4f\nv%d.sct=%.4f\n",i,(double)vi->sendB,i,(double)vi->scatter);
             APP("v%d.ph=%d,%.4f,%d,%.4f,%d,%.4f,%d,%.4f\n",i,vi->ph[0].mode,(double)vi->ph[0].spd,vi->ph[1].mode,(double)vi->ph[1].spd,vi->ph[2].mode,(double)vi->ph[2].spd,vi->ph[3].mode,(double)vi->ph[3].spd);

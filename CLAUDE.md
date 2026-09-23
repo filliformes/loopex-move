@@ -84,8 +84,9 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   confirm popup (K5 = NO / K8 = YES). The
   waveform display scan (`wave_compute`) and the Disintegration pass also run there.
 - **Pitch shifters** — Signalsmith Stretch **2048/512** (1024/256 was rejected by ear) on two
-  workers **`lpx-ps0` / `lpx-ps1`** (even / odd voices; SCHED_OTHER, cores 0-2, one `sem_post` each per
-  block). One worker overran with 13+ shifters (`late` climbing ~25/s); each hop is ~600 µs. Per-voice 16-block queue
+  workers **`lpx-ps0` / `lpx-ps1`** (even / odd voices; SCHED_OTHER at nice -10 - the process has CAP_SYS_NICE - cores 0-2, one `sem_post` each per
+  block). One worker overran with 13+ shifters (`late` climbing ~25/s); each hop is ~600 µs. At nice 0 both workers
+  were stalled >23 ms every ~2 s (12 pitched loops); nice -10 took that to ~0. Per-voice 24-block queue (PS_NQ), PS_D 8
   indexed by the global block number; the callback submits a block and collects the result
   `PS_D=4` blocks later (`psLat` includes it, the head-nudge compensates). Missing result ⇒
   keep the last block and ride `psReady` to dry over ~3 ms; `late=` counted in the profile.
@@ -113,8 +114,31 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   audio is skipped unless `dynOverwrite` - with none free the sampler parks (`dynWait`) and raises
   `dynFull`, which the UI turns into the CONTINUE DYNAMIC LOOPING / AND OVERWRITE PADS? popup (K6 = overwrite on, K5/Back = mode
   Off; it takes over any view and holds the view timeout while up). Changing the mode resets the permission. Modes 4 Pitch / 5 Novelty exist in the enum but
-  are hidden in ui.js until their worker-side analyser exists. Capture long-press (600 ms) toggles
+  are hidden in ui.js until their worker-side analyser exists. Clock counts Move's MIDI clock
+  (0xF8/0xFA in on_midi, before the len<3 guard; `clkFire` on each Size boundary, Free = 1 bar;
+  free-running fallback when no tick for 0.5 s) and keeps counting while a capture records; a
+  boundary closes the capture and opens the next. Sustain expiry sets `dynSpent` (pad free, no ask);
+  voice_tap/odub clear it. Only the latest capture's undo records survive (`UndoRec.dyn`). Phrase =
+  400 ms gap, 1 s minimum. No triggers while InSrc = Self. Capture long-press (600 ms) toggles
   Off <-> last mode; the white-only LED blinks while listening.
+- **ASYNC / SYNC** (0.9.2, Sessions K8 `syncMode`): a beat grid `beatPos` ALWAYS runs (tempo per
+  block from get_bpm; pulled onto Move's 0xF8 clock once 0xFA Start / 0xF2 Song Position has locked
+  it), so switching never starts anything. `sync_events` fires on beat/bar crossings: syncPend 1 =
+  record on the next beat (a tap <=1/8 beat late starts now with the pre-roll ring, which now always
+  runs), 2 = play from Start on the next bar; Start restarts playing loops. Tap-close rounds to bars
+  (`sync_round_len`, `recTarget`). Varispeed `tempoSm` = bpm/recBpm glided (recBpm saved as v<N>.bpm).
+  Jump/Scatter on 1/16s (`loop_beatS` = the loop's own grid); Stumble/Drift note values; FX-seq steps
+  from the grid; Pump phase slews onto it; punch slice mechs wait live (`gridWait`, ring still
+  recording) to the next grid line, then cut the slice that just played (`punch_slice_arm`); Rate/Len snap
+  to note values (`nv_snap`, Reverse via `rev_el` so its hop is the note); pressure steps (`press_step`,
+  hysteresis) and only re-latches on a full slice line (`runT`/`fullT`); Mosaic/Strum fire on grid cells
+  (`gCell`); punch LFO in note values, phase-slewed to the bar. ASYNC pressure: asymmetric smoothing
+  (in ~15 ms, out ~65 ms), Chop/Mosaic continuous, Strum humanised + probabilistic octave. Dynamic keeps a
+  separate SYNC Size (`dynSizeS`, default 1 bar); Free captures are rounded + enter on the bar;
+  Sustain in bars. Switching to ASYNC flushes pending starts and closes a take waiting for its bar.
+  UI: values re-quantise only when turned; Speed/head speeds on ratios, Start 1/16, End note lengths
+  (`v_grid`), header bars.beats (`v_bars`), beat lines on the waveform, pads blink while pending, and
+  taps poll instead of predicting the next state.
 - **Tape Wear** (0.9.2, `wear_apply`): per voice a STEREO damage map `wmap[2][WEAR_MAX]` of ~5.8 ms cells
   (weakness 70% shared / 30% per track, edge track L ×1.15, 10% cross-spill; file = nc, L, R)
   (WEAR_CELL 256), non-destructive. A head crossing a cell wears it: d += rate·(seed+4d)·(1−d),
@@ -123,6 +147,9 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   level (1−d)(1+d/2), per-lap per-track flicker, rare crackle. Zeroed at a new take and by
   voice_defaults (Reset heals); copied by clone; saved as `sNN_wearNN.bin`; carried by undo records
   (`wmap`/`wmapOn`). Knob `v_wear` / `v<N>.wr`, Tone page K8 (replaced the Heads shortcut).
+- **Loop window** (0.9.2): End is a LENGTH, `effLen = loopEnd*LEN` clamped to `LEN-effStart` (was
+  `loopEnd*avail`). Every jump crossfade is `XF_N` = 256 samples (was 64); Seed slices >= XF_N;
+  Ping heads reflect by the overshoot. Revert point before this: commit 906f740.
 - **Undo history** (0.9.2): `UndoRec hist[32]` in `loopex_t`, each with its own stereo buffer + gen
   stamps (calloc'd: address space until a loop records into it). Clear all = one AUDIO record per
   pad carrying the settings too (`hasSet`, `undo_audio_set`). Trigger knobs fire once per 400 ms. `undo_audio` SWAPS the pad's buffer pointers with

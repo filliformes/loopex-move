@@ -500,6 +500,11 @@ license (see `overtake-shell/vendor/` and the file headers); the rest is inspira
 - **Chase Bliss Blooper, Mood MK2, Generation Loss MK2** — Stability, the old Clock's
   degradation, Disintegration overdub, Generations. https://www.chasebliss.com
 - **Hologram Microcosm** — the grain and glide punch families. https://hologramelectronics.com/microcosm
+- **Chase Bliss Onward** — the Dynamic sampler's core idea: the input decides when to capture, and a
+  new capture *replaces* what was there instead of stacking on it. https://www.chasebliss.com/onward
+- **AC Noises Continua** — the stereo dynamic sampler behind Dynamic's rolling memory: **Spread**
+  is Continua's *dimension*, sixteen layers wide.
+  https://www.acnoises.com/products/continua-stereo-dynamic-sampler-and-multi-effect
 - **Character voicings** — every figure behind the thirteen Char models, with sources and an
   explicit mark on what is documented versus chosen: [docs/CHARACTER-RESEARCH.md](docs/CHARACTER-RESEARCH.md).
 - **Studer 961/962** — the per-loop channel EQ, modelled on the console's *Fächerentzerrer* (fan

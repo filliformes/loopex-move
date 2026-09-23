@@ -2,26 +2,67 @@
 
 ## v0.9.2 — unreleased
 
+### Tape Wear — the Disintegration Loops, per loop
+- **New knob: Wear** (Tone page, K8). Your loops can now wear out the way William Basinski's ageing
+  tape loops did in *The Disintegration Loops*, where the oxide flaked off a little more on every pass
+  over the head. Every time a playhead crosses a spot on the loop, that spot loses some oxide: the
+  treble goes first (the physics of a head lifted off the tape by loose flakes), then the level, until
+  the spot drops out entirely. Damage starts at a few weak places, grows where it started and speeds
+  up near the end — so the music breaks into the *same* holes every lap and stays recognisable while
+  it dies. It is truly stereo — like the two tracks side by side on real tape, each has its own
+  damage, mostly shared, partly its own, the edge track wearing a little faster — so a hole often
+  opens on one side first and the stereo image wanders as the loop dies. Every active playhead
+  wears the tape, so four heads rot it faster.
+- **The knob is a speed, not an amount.** At the top an 8-second loop collapses in about a minute; in
+  the middle, about twenty; near the bottom it takes hours. At 0 the tape stops wearing — the damage
+  stays exactly where it is. Only **Reset** (Shift + Undo + pad, or Sessions → Reset) heals it.
+- **Nothing is destroyed.** The recording and the saved WAV stay clean; the damage is a map laid over
+  it, saved with the session (a half-dead loop reopens half-dead), copied when you clone a loop, and
+  undone with everything else. A new recording on a pad starts on fresh tape.
+
+**What behaves differently from before**
+- **The Tone page's K8 is Wear, not Heads ▸.** The Playheads page is still one press of **Down** (or a
+  second tap on the loop's step) away.
+- **Wear is not the Disintegration overdub mode.** That mode (Settings → ODub) still re-applies the
+  loop's own effects into the audio once per *overdub pass* and changes the recording itself. Wear
+  works on any recorded loop, while it simply plays, on its own clock, and never touches the audio.
+- **Reset now also heals worn tape**, and Undo of a reset / randomise / clear brings the damage back
+  with the rest.
+
 ### Dynamic sampling (Capture button)
 - **The input plays the sampler.** Four modes — **Level**, **Onset**, **Phrase**, **Clock** — capture
   every phrase you play into a pad by itself, as an ordinary recording (tape stage, loop pages, sends,
   LEDs). What was on the pad is replaced, never stacked (Onward); **Spread** rotates through 1–16
   pads (Continua's *dimension*, sixteen layers wide); muted pads are skipped; a pad with audio is never
-  overwritten until you answer `ALL PADS FULL: OVERWRITE?`. **Sense**, **Size** (tempo divisions or
+  overwritten until you answer `CONTINUE DYNAMIC LOOPING AND OVERWRITE PADS?` (K6 yes, K5 no — it takes over any view). **Sense**, **Size** (tempo divisions or
   Free), **Error** (each capture randomised by that much), **Sustain** (a capture pauses itself after
   1–60 s, or never). 100 ms pre-roll keeps the triggering transient. Long-press Capture toggles it;
   the LED blinks while listening. Pitch- and novelty-triggered modes to follow.
-- **Rnd Pad / Rnd All** randomise the loop pages by musical rules: Speed and Pitch only as complementary
+- **Rnd Pad / Rnd All** randomise the loop pages by musical rules (each FX stage engaged with a 50 %
+  chance, otherwise off — everything on at once on sixteen loops was neither musical nor affordable): Speed and Pitch only as complementary
   musical intervals, playhead speeds untouched, heads 2–4 on/off with pan only when active, Volume
-  untouched, sends / Comp / Sat capped at 60 %.
+  untouched, the Start/End window never under half the loop, sends / Comp / Sat capped at 60 %.
 
 ### Input
+- **Generations** now re-applies the machine's head bump per pass and adds wow per dub, alongside the
+  cascaded loss filter (a static "as if dubbed N times" setting, up to four).
 - **Input FX and Input Tape merged** under track button 1 as *Input Tape* / *Input EQ*; Capture freed.
 - **Input EQ blended** from the Studer 962 presence band and the Tascam 424 MkII/MkIII channel EQ
   (owner's manual): ±15 dB shelves with a sweepable low corner (**LowF** 40–400 Hz, default 100) and a
   3–15 kHz high corner (default 10 kHz), ±12 dB mid 150 Hz–7 kHz; every sweep log, LoCut 20–800 Hz log.
 
+### Undo
+- **Sixteen levels.** Undo walks back through the last sixteen gestures, newest first: overdubs,
+  clears, arms, Dynamic overwrites, randomise, reset. A gesture that touched several pads (Rnd All,
+  Clear) comes back in one press. Audio undo swaps buffers rather than copying, so it is instant.
+- **Undo + pad no longer overdubs** (that is the step hold); **Shift + Undo + pad** resets that loop's
+  settings, the same as Sessions → Reset.
+
 ### Gestures
+- **Start and End are precise and fluid.** A slow turn moves 2 ms of audio per detent whatever the
+  loop's length (it was a fixed 0.6 % of the loop — 270 ms per click on a 45 s loop); turning faster
+  accelerates smoothly, so one quick twist still crosses the whole loop. The position is kept to the
+  sample through saves and reloads.
 - **Hold a loop's step button (~0.6 s) to overdub it** — one-handed, no menu, no mode. Hold again
   to stop. Undo + pad still works. A short tap selects as before; on the selected loop the tap
   flips to the next page on release. (Thanks Hannes.)
@@ -46,7 +87,7 @@ Changed in 0.9.0, never announced:
   confirmation (global pages untouched), header back to *New*. K5 is also *NO* inside the popup, so a second turn cancels
   rather than wipes. (Thanks Hannes.)
 - **Reset** on the Sessions page (K6): every setting of the selected loop back to factory — the audio
-  stays and keeps playing — after a confirmation. **Clear** resets the loops' settings too. The defaults are the very same function
+  stays and keeps playing — after a confirmation. **Reset All** (K7) does it for all sixteen. **Clear** resets the loops' settings too. The defaults are the very same function
   `create_instance` uses, so "reset" means exactly "as new". (Thanks Hannes.)
 
 ## v0.9.1 — 2026-09-20
@@ -128,7 +169,8 @@ physics, a long list of click fixes, and a hardware-profiled CPU pass that took 
   silence — is fixed at the source.
 
 ### CPU pass (profiled on the Move)
-- **Per-loop pitch shifters run on their own worker thread** (`lpx-ps`, SCHED_OTHER, cores 0–2).
+- **Per-loop pitch shifters run on their own worker thread** (`lpx-ps`, SCHED_OTHER, cores 0–2; 0.9.2
+  splits it into two, `lpx-ps0` / `lpx-ps1`, after a full randomise with 13+ pitched loops overran one).
   A Signalsmith hop cost ~600 µs — a quarter of the audio callback's slack — for one pitched loop;
   it now costs the callback two `memcpy`s. Results are collected four blocks later (latency 61 ms,
   cancelled by the head-nudge as before); a missed deadline rides that loop to dry over 3 ms

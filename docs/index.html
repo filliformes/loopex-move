@@ -250,7 +250,7 @@
   </div>
   </div>
   <div class="grid g2" style="margin-top:22px">
-    <div class="card k"><h3>Loop pads (left)</h3><p>Tap to record / play / pause — un-pausing restarts the loop from its Start point, re-phasing all four playheads. <b>Undo + pad</b> overdubs. Hold to clear. Colour shows state, tinted by playback speed.</p></div>
+    <div class="card k"><h3>Loop pads (left)</h3><p>Tap to record / play / pause — un-pausing restarts the loop from its Start point, re-phasing all four playheads. <b>Hold the step button</b> to overdub. Hold the pad to clear. Colour shows state, tinted by playback speed.</p></div>
     <div class="card k"><h3>Punch pads (right)</h3><p>Hold to apply a momentary effect on the master. Coloured by family. Up to five stack in series; pressure adds intensity.</p></div>
     <div class="card k"><h3>Steps + arrows</h3><p>A step selects a loop and shows its waveform. <kbd>Up</kbd>/<kbd>Down</kbd> move between its five pages. <kbd>◀ ▶</kbd> are the tape brake / wind.</p></div>
     <div class="card k"><h3>Jog wheel</h3><p>Scrubs the selected loop like tape: audibly, even when paused. On the Playheads page it moves the touched head.</p></div>
@@ -273,7 +273,7 @@
 <section id="dynamic">
   <div class="eyebrow">Dynamic</div>
   <h2>The input plays the sampler</h2>
-  <p class="lede">On the <b>Capture</b> button. Set <b>Dyn</b> to a mode &mdash; or <b>hold Capture</b> to toggle it; the button blinks while it listens &mdash; and every phrase you play is captured into a pad by itself. A capture is an ordinary recording: it gets the tape stage, the loop pages, the sends, and its pad goes red then green like any take. What was on the pad is <em>replaced</em>, never stacked (Chase Bliss Onward); <b>Spread</b> is how many pads the sampler rotates through from the selected one &mdash; 1 replaces the same pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Continua&rsquo;s <em>dimension</em>, with sixteen layers). Muted pads are skipped, and a pad that already holds a loop is never overwritten until you say so: when the range is full the menu opens and asks <code>ALL PADS FULL: OVERWRITE?</code>.</p>
+  <p class="lede">On the <b>Capture</b> button. Set <b>Dyn</b> to a mode &mdash; or <b>hold Capture</b> to toggle it; the button blinks while it listens &mdash; and every phrase you play is captured into a pad by itself. A capture is an ordinary recording: it gets the tape stage, the loop pages, the sends, and its pad goes red then green like any take. What was on the pad is <em>replaced</em>, never stacked (Chase Bliss Onward); <b>Spread</b> is how many pads the sampler rotates through from the selected one &mdash; 1 replaces the same pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Continua&rsquo;s <em>dimension</em>, with sixteen layers). Muted pads are skipped, and a pad that already holds a loop is never overwritten until you say so: when the range is full it asks <code>CONTINUE DYNAMIC LOOPING AND OVERWRITE PADS?</code> over whatever view is showing &mdash; K6 yes, K5 or Back turns Dynamic off.</p>
   <div class="scroll"><table class="thin">
     <tr><th>Knob</th><th>What it does</th></tr>
     <tr><td>Dyn</td><td>Off &middot; <b>Level</b> (a sound above the threshold) &middot; <b>Onset</b> (a transient, however loud the sustain under it) &middot; <b>Phrase</b> (starts on sound, stops at the next gap) &middot; <b>Clock</b> (every Size, on Move&rsquo;s tempo)</td></tr>
@@ -298,7 +298,7 @@
     <tr><th>Page</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th></tr>
     <tr><td>P1 · Loop</td><td>Speed</td><td>Filter</td><td>Pan</td><td>Volume</td><td>Start</td><td>End</td><td>Reverse</td><td>Send A</td></tr>
     <tr><td>P2 · Texture</td><td>Pitch</td><td>Reso</td><td>Sat</td><td>Comp</td><td>Wow/Flut</td><td>Scatter</td><td>Seed</td><td>Send B</td></tr>
-    <tr><td>P3 · Tone</td><td>Bass</td><td>MidF</td><td>MidGain</td><td>Treble</td><td>Tilt</td><td>Attack</td><td>Decay</td><td>Heads ▸</td></tr>
+    <tr><td>P3 · Tone</td><td>Bass</td><td>MidF</td><td>MidGain</td><td>Treble</td><td>Tilt</td><td>Attack</td><td>Decay</td><td>Wear</td></tr>
     <tr><td>P4 · Heads</td><td>H1 mode</td><td>H1 spd</td><td>H2 mode</td><td>H2 spd</td><td>H3 mode</td><td>H3 spd</td><td>H4 mode</td><td>H4 spd</td></tr>
     <tr><td>P5 · HeadMix</td><td>H1 Vol</td><td>H1 Pan</td><td>H2 Vol</td><td>H2 Pan</td><td>H3 Vol</td><td>H3 Pan</td><td>H4 Vol</td><td>H4 Pan</td></tr>
   </table></div>
@@ -306,6 +306,7 @@
   <div class="grid g3">
     <div class="card"><h3>Seed</h3><p>A seeded re-order of the loop's slices (2/4/8/16, some reversed). The knob <em>is</em> the seed: every position is a different, repeatable mangle. Click-free.</p></div>
     <div class="card"><h3>Scatter</h3><p>Stochastic slice jumps with crossfades: from gentle stutter to full shuffle.</p></div>
+    <div class="card"><h3>Tape Wear</h3><p>The loop wears out like Basinski&rsquo;s <em>Disintegration Loops</em>: every pass of a playhead flakes a little oxide off that spot, treble first, then level, until it drops out &mdash; the damage grows where it started and speeds up at the end. Each track has its own damage, so a hole often opens on one side first and the image wanders as the loop dies. The knob is the rate; 0 freezes the damage, Reset heals it. The recording itself is never touched.</p></div>
     <div class="card"><h3>Filter + Reso</h3><p>A DJ-style filter: low-pass left of centre, high-pass right, with resonance. Smoothed, so sweeps never step.</p></div>
     <div class="card"><h3>Studer EQ</h3><p>The 961/962 channel EQ, a <em>F&auml;cherentzerrer</em> (fan equaliser): every setting crosses 0&nbsp;dB at a ~1&nbsp;kHz pivot and slopes continuously outward, with no shelf plateau in the band. Bass reaches &plusmn;15&nbsp;dB at 20&nbsp;Hz, Treble &plusmn;15&nbsp;dB at 20&nbsp;kHz. Corners and slopes are fitted to the curves printed in Studer’s service manual.</p></div>
     <div class="card"><h3>Presence</h3><p>The console’s Pr&auml;senz/Absenz band: a &plusmn;11&nbsp;dB peak at Q&nbsp;=&nbsp;1, sweepable 150&nbsp;Hz&ndash;7&nbsp;kHz, to the published spec. <b>Tilt</b> sits alongside it and tips the whole spectrum about 800&nbsp;Hz.</p></div>
@@ -432,7 +433,7 @@
 <section id="sessions">
   <div class="eyebrow">Sessions</div>
   <h2>Save the whole rig</h2>
-  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot; <b>Clear</b> (K5) wipes all sixteen loops and resets their settings, leaving the global pages alone; <b>Reset</b> (K6) returns every setting of the selected loop to factory, leaving its audio playing. Saving over a used slot, deleting one, clearing or resetting asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback; a second background thread runs the per-loop pitch shifters. Sessions live under <code>/data/UserData/UserLibrary/Loopex/</code> and survive reinstalls. The audio is stored as plain 16-bit stereo WAV files, one per loop (<code>sessionNN/sNN_loop01.wav</code> &hellip;), so you can copy them off the Move and use them anywhere.</p>
+  <p>Sixty-four slots on the &#8801; (Menu) button. A session stores every setting, the punch-pad values, the FX-sequencer pattern <em>and</em> all recorded audio. <b>Del</b> (K4) erases a slot; <b>Clear</b> (K5) wipes all sixteen loops and resets their settings, leaving the global pages alone; <b>Reset</b> (K6) returns every setting of the selected loop to factory, leaving its audio playing; <b>Reset All</b> (K7) does it for all sixteen. Saving over a used slot, deleting one, clearing or resetting asks first; each is date-and-time named, and the header shows which session is loaded. All disk work happens on a background thread, never on the audio callback, so saving never glitches playback; a second background thread runs the per-loop pitch shifters. Sessions live under <code>/data/UserData/UserLibrary/Loopex/</code> and survive reinstalls. The audio is stored as plain 16-bit stereo WAV files, one per loop (<code>sessionNN/sNN_loop01.wav</code> &hellip;), so you can copy them off the Move and use them anywhere.</p>
 </section>
 
 <section id="cheat">
@@ -442,7 +443,7 @@
     <tr><th>Gesture</th><th>Action</th></tr>
     <tr><th colspan="2">Left 16 pads: the loops</th></tr>
     <tr><td>Tap</td><td>record → play ⇄ pause</td></tr>
-    <tr><td>Undo + pad</td><td>overdub (tap again to stop) — or hold the loop&rsquo;s step button</td></tr>
+    <tr><td>Shift + Undo + pad</td><td>reset that loop&rsquo;s settings (audio stays)</td></tr>
     <tr><td>Hold (~1 s)</td><td>clear the loop (Undo restores)</td></tr>
     <tr><td>Shift + left pad</td><td>cycle playback speed ½× · 1× · 2×</td></tr>
     <tr><td>Mute + left pad</td><td>quick mute (stays in phase)</td></tr>
@@ -465,7 +466,7 @@
     <tr><td>Menu (≡)</td><td>Sessions menu</td></tr>
     <tr><td>✕ (Delete)</td><td>tap: run / stop the FX sequencer · hold: pattern view + FX Seq page</td></tr>
     <tr><td>◀ / ▶</td><td>tape brake / wind (held)</td></tr>
-    <tr><td>Undo</td><td>revert last overdub, else last clear</td></tr>
+    <tr><td>Undo</td><td>step back through the last 16 gestures: overdub, clear, Dynamic overwrite, randomise, reset</td></tr>
     <tr><td>Back / Shift+Back</td><td>close menu, then suspend / full exit</td></tr>
   </table></div>
 </section>

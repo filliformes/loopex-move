@@ -44,7 +44,7 @@ Navigate with **Down** (next) and **Up** (previous).
 |------|-------|
 | **P1 · Loop** | **Speed** · Filter · Pan · Volume · Start · End · Reverse · **Send A** |
 | **P2 · Texture** | **Pitch** · **Reso** · Sat · Comp · Wow/Flutter · Scatter · **Seed** · Send B |
-| **P3 · Tone** | Studer **Bass · MidF · MidGain · Treble** · Tilt · Attack · Decay · **Heads ▸** |
+| **P3 · Tone** | Studer **Bass · MidF · MidGain · Treble** · Tilt · Attack · Decay · **Wear** |
 | **P4 · Playheads** | H1 mode/speed · H2 · H3 · H4 |
 | **P5 · HeadMix** | per-head **Vol/Pan** — H1 (mirrors P1 Vol/Pan) · H2 · H3 · H4 |
 
@@ -52,7 +52,7 @@ Navigate with **Down** (next) and **Up** (previous).
   Reads are 4-point Hermite with a rate-aware anti-imaging filter below 0.75×; the sampler
   Characters replace that with linear or drop-sample reads, which is where their grit comes from.
 - **Pitch** — an independent shift, −24 to +24 semitones, tempo untouched: a Signalsmith Stretch
-  phase-vocoder shifter. It runs on its own worker thread (`lpx-ps`), off the audio callback, and
+  phase-vocoder shifter. It runs on two worker threads (`lpx-ps0` / `lpx-ps1`, even and odd loops), off the audio callback, and
   its latency (61 ms including the hand-off queue) is cancelled by nudging the playheads, so the
   loop stays in time.
 - **Seed** — a Smack-style *seeded slice re-order* (2/4/8/16 slices, some reversed). The knob
@@ -61,6 +61,16 @@ Navigate with **Down** (next) and **Up** (previous).
 - **DJ Filter + Reso** — continuous LP/HP sweep with resonance, smoothed over ~10 ms.
 - **Attack / Decay** — per-loop amplitude envelope (3 ms → 3 s / 5 s), used on trigger,
   mute, pause and stop.
+- **Wear** (Tape Wear) — the loop wears out like the ageing tape loops of William Basinski's
+  *Disintegration Loops*. The knob is a **rate**: every time a playhead crosses a spot on the loop,
+  that spot loses a little oxide. Treble goes first (spacing loss, 54.6·gap/wavelength dB), then
+  the level, until the spot drops out; damage grows where it started and speeds up at the end, so
+  the melody fragments into the same holes lap after lap. It is truly stereo: each track has its own
+  damage (mostly shared, partly its own, the edge track wearing a little faster), so a hole often
+  opens on one side first and the image wanders as the loop dies. More active playheads wear it faster.
+  Turn it to 0 and the tape stops wearing but stays damaged; **Reset** heals it. The recording
+  itself (and the saved WAV) is never touched, and the damage is saved with the session. At the
+  top an 8-second loop collapses in about a minute, in the middle in about twenty.
 
 ### Two send buses — the Palette engine
 Send A and B each select from **29 effects** (Off + 24 Palette effects + four reverbs):
@@ -117,7 +127,9 @@ Gen. The 13 models are `Tapeless · Clean · Cass1 · Cass2 · VHS1 · VHS2 · R
 Porta · Dub · Warp`, default `Clean`. Each model's high-frequency loss is derived from its head gap
 and tape speed, with a speed-scaled head bump, so the three reel speeds genuinely differ; **VHS1** is
 the Hi-Fi track (an FM carrier with its companding noise reduction, bright but pumping) and **VHS2**
-the linear edge track, slow and dark; **Gen** re-applies the machine's own loss filter once per pass.
+the linear edge track, slow and dark; **Gen** is a static
+setting — the take is recorded *as if* already dubbed up to four times on that machine: the loss filter
+and the head bump re-applied once per pass, a little more saturation and hiss, and more wow per dub.
 **Tapeless** bypasses the machine — no hiss floor, no head loss or bump — but every knob still works,
 and Drive pushes up to +24 dB into the curve on every model.
 
@@ -137,11 +149,11 @@ green like any take. What was on the pad is *replaced*, never stacked (Chase Bli
 pad every time, 16 is a rolling memory of the last sixteen phrases (AC Noises Continua's
 *dimension*, with sixteen layers). Muted pads are skipped, and a pad that already holds a loop is
 **never overwritten until you say so**: when the range is full the menu opens and asks
-`ALL PADS FULL: OVERWRITE?` — K8 lets it carry on, K5 or Back turns Dynamic off.
+`CONTINUE DYNAMIC LOOPING AND OVERWRITE PADS?` in whatever view you are in — K6 lets it carry on, K5 or Back turns Dynamic off.
 
 | Knob | |
 |---|---|
-| **Dyn** | Off · **Level** (a sound above the threshold) · **Onset** (a transient, however loud the sustain under it) · **Phrase** (starts on sound, stops at the next gap) · **Clock** (every Size, on Move's tempo) |
+| **Dyn** | Off · **Level** (a sound above the threshold) · **Onset** (a transient, however loud the sustain under it; the next hit ends one capture and starts the next) · **Phrase** (starts on sound, stops at the next gap) · **Clock** (every Size, on Move's tempo) |
 | **Sense** | the mode's threshold, −60 → −6 dBFS |
 | **Size** | 1/16 … 8 bars at Move's tempo, or **Free** — record until 200 ms of quiet (default) |
 | **Spread** | 1–16 pads from the selected one (default 16) |
@@ -153,7 +165,8 @@ A 100 ms pre-roll means a capture keeps the transient that triggered it. **Rando
 transposition and the tempo ratio are both octaves, fifths or major/minor thirds — never more than two
 octaves — and a third of the time nothing moves),
 playhead speeds are never touched, heads 2–4 are switched on or off and only an active one gets a
-random pan, the loop's Volume is left alone, and sends, Comp and Sat never go past 60 %.
+random pan, the loop's Volume is left alone, the Start/End window never drops below half the loop, and sends, Comp and Sat
+never go past 60 %.
 
 ### Drift — a global evolving memory (Sample button)
 A drifting-delay memory station inspired by **Soma COSMOS**, on the **Sample** button. Four
@@ -180,9 +193,10 @@ browser (`move.local:7700` → Files → `data/UserData/UserLibrary/Loopex`); se
 are moved there and still load.
 **Clear** (K5 on the Sessions page) wipes all sixteen loops *and* resets every loop's settings after
 a confirmation (the global pages — Output, Input, Drift… — are untouched); **Reset** (K6) returns every *setting* of the selected loop to factory defaults — the audio
-and its playback are untouched — also after a confirmation; all disk work runs on a `SCHED_OTHER` worker thread (`lpx-sio`) pinned
-to cores 0–2, never on the audio callback. A second worker, `lpx-ps`, runs the per-loop pitch
-shifters the same way. Sessions live in
+and its playback are untouched — and **Reset All** (K7) does the same for all sixteen, both after a
+confirmation; all disk work runs on a `SCHED_OTHER` worker thread (`lpx-sio`) pinned
+to cores 0–2, never on the audio callback. Two more workers, `lpx-ps0` and `lpx-ps1`, run the
+per-loop pitch shifters the same way (even and odd loops). Sessions live in
 `/data/UserData/UserLibrary/Loopex/` so reinstalls keep them.
 
 ### Perform, MIDI and I/O
@@ -239,7 +253,9 @@ shifters the same way. Sessions live in
   at the end of the master chain keeps it saturating instead of diverging, and InGain is the control.
   If the host cannot provide a stem (they need host **1.4** with `link_audio_publish` on), Loopex records
   Line instead and says so on screen while Settings is open.
-- **Undo** reverts the last overdub exactly (each overwritten sample is saved as it goes), else restores the last cleared loop.
+- **Undo** walks back a **16-level history** (32 records; a gesture on all sixteen pads is one level): overdubs (every overwritten sample is saved as it goes),
+  clears, arms, Dynamic overwrites, randomise, reset — newest gesture first; a gesture that touched
+  several pads (Rnd All, Clear) comes back in one press. Audio undo swaps buffers, so it is instant.
 
 ### LaunchControl XL (external MIDI)
 A Novation LaunchControl XL can drive all sixteen loops. Set **MIDI** (Settings p1) to **`Ctrl`** to
@@ -262,7 +278,7 @@ channel-1 pads.
 | Gesture | Action |
 |---------|--------|
 | **Tap** left pad | cycle Empty → Rec → Play ⇄ Pause (un-pause restarts from Start) |
-| **Undo + pad** (playing/paused) | Overdub (tap again to stop) — or **hold the loop's step button** |
+| **Shift + Undo + pad** | reset that loop's settings to factory (audio stays) |
 | **Hold** left pad (~1 s) | Clear the loop *(Undo restores it)* |
 | **Shift + tap** | cycle playback speed (½× / 1× / 2×) |
 | **Mute + tap** | quick-mute (playhead keeps running — returns in phase) |
@@ -285,7 +301,7 @@ channel-1 pads.
 | **Sample/Record** | Drift menu · **Shift + Sample** = threshold-arm (pad blinks red) · **+ jog** sets the threshold |
 | **≡ (Menu)** | Sessions menu |
 | **Mute / Copy / Loop** (held) | modifiers — lit while held |
-| **Undo** | revert the last overdub, else restore the last-cleared loop |
+| **Undo** | step back through the last 16 gestures: overdub, clear, Dynamic overwrite, randomise, reset |
 | **Back** | close a menu, then exit |
 | **Full exit** | **Shift + Volume + Jog-click** (a plain Back only *suspends*) |
 

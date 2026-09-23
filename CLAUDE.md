@@ -78,13 +78,14 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   `SCHED_OTHER` worker (`lpx-sio`) pinned to cores 0-2**, joined in `destroy_instance`. Audio is
   `sessionNN/sNN_loopNN.wav` (both 1-based, as the pads and slots are numbered) (16-bit stereo WAV, interleaved on the worker in 4096-frame chunks; `wav_write`
   / `wav_read`); pre-0.9.2 `tNN.raw` (L block then R block) is read as a fallback and removed once
-  a `.wav` has been written over it. Sessions page K5 = **Clear** (`clearAll`: `voice_clear` + `voice_defaults` on all 16) and K6 = **Reset** (`resetSel`:
+  a `.wav` has been written over it. Sessions page K5 = **Clear** (`clearAll`: `voice_clear` + `voice_defaults` on all 16) and K6 = **Reset** (`resetSel`) / K7 = **Reset All** (`resetAll`, one undo group) (`resetSel`:
   `voice_defaults` with state/loopLen/playPhase/muted preserved - settings only, audio stays; the same
   function `create_instance` uses), both with the Del-style
   confirm popup (K5 = NO / K8 = YES). The
   waveform display scan (`wave_compute`) and the Disintegration pass also run there.
-- **Pitch shifters** — Signalsmith Stretch **2048/512** (1024/256 was rejected by ear) on a second
-  worker **`lpx-ps`** (SCHED_OTHER, cores 0-2, `sem_post` per block). Per-voice 16-block queue
+- **Pitch shifters** — Signalsmith Stretch **2048/512** (1024/256 was rejected by ear) on two
+  workers **`lpx-ps0` / `lpx-ps1`** (even / odd voices; SCHED_OTHER, cores 0-2, one `sem_post` each per
+  block). One worker overran with 13+ shifters (`late` climbing ~25/s); each hop is ~600 µs. Per-voice 16-block queue
   indexed by the global block number; the callback submits a block and collects the result
   `PS_D=4` blocks later (`psLat` includes it, the head-nudge compensates). Missing result ⇒
   keep the last block and ride `psReady` to dry over ~3 ms; `late=` counted in the profile.
@@ -110,14 +111,33 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
   then `voice_randomize(v, dynError)` and a Sustain timer (`dynDie`, paused when it expires). Target
   = selected pad + rotating cursor within Spread, skipping muted/armed/recording pads; a pad with
   audio is skipped unless `dynOverwrite` - with none free the sampler parks (`dynWait`) and raises
-  `dynFull`, which the UI turns into the ALL PADS FULL popup (K8 = overwrite on, K5/Back = mode
-  Off). Changing the mode resets the permission. Modes 4 Pitch / 5 Novelty exist in the enum but
+  `dynFull`, which the UI turns into the CONTINUE DYNAMIC LOOPING / AND OVERWRITE PADS? popup (K6 = overwrite on, K5/Back = mode
+  Off; it takes over any view and holds the view timeout while up). Changing the mode resets the permission. Modes 4 Pitch / 5 Novelty exist in the enum but
   are hidden in ui.js until their worker-side analyser exists. Capture long-press (600 ms) toggles
   Off <-> last mode; the white-only LED blinks while listening.
-- **Randomiser** (`voice_randomize`, also Rnd Pad / Rnd All): Speed and Pitch as complementary
+- **Tape Wear** (0.9.2, `wear_apply`): per voice a STEREO damage map `wmap[2][WEAR_MAX]` of ~5.8 ms cells
+  (weakness 70% shared / 30% per track, edge track L ×1.15, 10% cross-spill; file = nc, L, R)
+  (WEAR_CELL 256), non-destructive. A head crossing a cell wears it: d += rate·(seed+4d)·(1−d),
+  seed from a per-cell hash (weak spots), 15% to the neighbours; rate = 0.0005·400^knob per
+  crossing (0 = frozen). Read: interpolated d → Wallace spacing-loss one-pole (fc = 5220/(6d) Hz),
+  level (1−d)(1+d/2), per-lap per-track flicker, rare crackle. Zeroed at a new take and by
+  voice_defaults (Reset heals); copied by clone; saved as `sNN_wearNN.bin`; carried by undo records
+  (`wmap`/`wmapOn`). Knob `v_wear` / `v<N>.wr`, Tone page K8 (replaced the Heads shortcut).
+- **Undo history** (0.9.2): `UndoRec hist[32]` in `loopex_t`, each with its own stereo buffer + gen
+  stamps (calloc'd: address space until a loop records into it). Clear all = one AUDIO record per
+  pad carrying the settings too (`hasSet`, `undo_audio_set`). Trigger knobs fire once per 400 ms. `undo_audio` SWAPS the pad's buffer pointers with
+  the record's (clear / arm / Dynamic overwrite / Clear all - via `loop_clear`); `undo_settings`
+  snapshots a `VoiceSettings` (randomise, reset via `loop_reset`); an overdub start pushes an
+  UR_OVERDUB record whose diff the record loop fills (`odRec`). `undo_pop` restores every record of
+  the newest group on the callback, except overdubs, which go PENDING to the worker (`undoReq` =
+  slot+1). `histGroup++` per gesture. Voice and record buffers are one permuted set: destroy frees
+  both. `undoAvail` = "n:Tx what", `undoMsg` after a pop. Undo+pad no longer overdubs; Shift+Undo+pad
+  = `reset:N`.
+- **Randomiser** (`voice_randomize`, also Rnd Pad / Rnd All): 75% speed-only transposition (no shifter
+  engaged - a full randomise that pitched 11 loops overran the shifter worker), else Speed and Pitch as complementary
   musical intervals (T = heard, S = tempo, both from {0,±3,±4,±7,±12,±15,±16,±19,±24}, P = T-S within
-  ±24, every valid pair enumerated and picked uniformly), unison 30% of the time; head speeds untouched; heads 2-4 on/off with pan only when
-  active; Volume untouched; send/sendB/comp/sat <= 0.6; Start/End window >= 5%.
+  ±12, every valid pair enumerated and picked uniformly), unison 30% of the time; head speeds untouched; heads 2-4 on/off with pan only when
+  active; Volume untouched; send/sendB/comp/sat <= 0.6; Start/End window >= 50% (or left whole).
 - **Input Tape knobs act on every model** (0.9.1). They were gated on `preModel>0`, which made the
   page dead on Tapeless and Drive a x4-then-/4 no-op on Clean. Tapeless/Clean soft-clip under Drive.
 

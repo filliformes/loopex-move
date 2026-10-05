@@ -123,6 +123,37 @@ function punchRateDisp(i, v) {   /* knob 5 of the timed effects, as a note value
     if (i === 7) return ['1/4', '1/4T', '1/8', '1/8T', '1/16', '1/16T', '1/32'][Math.round(v * 6)];   /* Strum */
     return null;
 }
+/* PRESSURE ON THE KNOB (after Charles Vestal's MonkSynth / the Schwung knob grid): while a punch pad is held,
+ * the knob its pressure drives shows the range pressure can reach (an inner arc) and a notch riding where it
+ * is now. Each mapping is the engine's own pressure law (loopex.c punch_slot_process) re-expressed as a
+ * position on that knob, so the notch sits where turning the knob alone would put the sound. */
+function punchPressTarget(i) {
+    const P = punchVals[i], cl = x => Math.max(0, Math.min(1, x));
+    if (i <= 2)  return { j: 0, at: p => cl(P[0] - 0.5 * p) };                                   /* Loops: 1/1 .. 1/4 = Rate - 0.5 */
+    if (i === 3) return { j: 0, at: p => cl(P[0] + 0.25 * p) };                                  /* Chop: rate x2 = one step */
+    if (i === 4) return { j: 2, at: p => cl(((2 + 40 * P[2]) * (1 + 3 * p) - 2) / 40) };          /* Haze: density x4 */
+    if (i === 5) return { j: 0, at: p => cl(P[0] + 0.25 * p) };                                  /* Mosaic: grid x2 = one step */
+    if (i === 6) return { j: 2, at: p => cl(((1 + 12 * P[2]) * (1 + 3 * p) - 1) / 12) };          /* Smear: density x4 */
+    if (i === 7) return { j: 0, at: p => cl(1 - ((0.06 + (1 - P[0]) * 0.4) * (1 - 0.6 * p) - 0.06) / 0.4) };   /* Strum: faster */
+    if (i === 8 || i === 9) return { j: 3, at: p => cl(P[3] + (1 - P[3]) * p) };              /* Oct-/Oct+: mix */
+    if (i === 10) return { j: 1, at: p => cl(0.5 + (P[1] - 0.5) * (1 + 2 * p)) };              /* Glide: harder glide */
+    if (i === 11) return { j: 0, at: p => cl(P[0] + p * 0.3 / 0.85) };                         /* Shimmer: regen */
+    if (i === 12 || i === 13) return { j: 0, at: p => cl(P[0] + (1 - P[0]) * p) };              /* Stretch / Freeze: freeze */
+    if (i === 14) return { j: 0, at: p => cl(((0.25 + 1.75 * P[0]) * (1 - 0.6 * p) - 0.25) / 1.75) };   /* Reverse: shorter */
+    if (i === 15) { const ring = PFX_NAMES[Math.round(P[0] * (PFX_NAMES.length - 1))] === 'Ring';
+        return ring ? { j: 2, at: p => cl(P[2] + (1 - P[2]) * p) } : { j: 1, at: p => cl(P[1] + (1 - P[1]) * p) }; }   /* PalFX: Macro on Ring, else Amount */
+    return null;
+}
+/* The range as dots on an inner arc, the live value as a 5-pixel plus on it. */
+function drawPressRange(ctx, kx, ky, a, b, live) {   /* KNOB_R is declared further down: read it here, at draw time, never at load */
+    const PRESS_R = KNOB_R - 3, cx = kx + KNOB_R, cy = ky + KNOB_R, lo = Math.min(a, b), hi = Math.max(a, b);
+    const at = t => { const rad = (KNOB_START_DEG + t * KNOB_SWEEP_DEG) * Math.PI / 180;
+        return [Math.round(cx + PRESS_R * Math.sin(rad)), Math.round(cy - PRESS_R * Math.cos(rad))]; };
+    const n = Math.max(1, Math.ceil((hi - lo) * 24));
+    for (let k = 0; k <= n; k++) { const [x, y] = at(lo + (hi - lo) * k / n); ctx.fillRect(x, y, 1, 1, 1); }
+    const [x, y] = at(live);
+    ctx.fillRect(x - 1, y, 3, 1, 1); ctx.fillRect(x, y - 1, 1, 3, 1);
+}
 function punchDisp(i, j, v) { const e = punchEnum(i, j); if (e) return e.disp(e.fromVal(v)); if (j === 0) { const r = punchRateDisp(i, v); if (r) return r; } return Number(v).toFixed(2); }
 let punchMode = false, punchActive = -1, punchTookMenu = false;   /* a knob turn pulled us out of a menu during this punch */
 const heldPunch = [];  /* currently-held punch pads (up to 4, in press order) */
@@ -142,7 +173,7 @@ punchVals[11] = [0.5, 0.5, 0.5, 1.0];   /* Shimmer: regen, +1 octave, mid tone *
 punchVals[12] = [0.5, 0.5, 0.0, 1.0];   /* Stretch: mid stretch, tight grain (0 = default: bigger grain -> granular) */
 punchVals[13] = [1.0, 0.5, 0.0, 1.0];   /* Freeze:  full freeze, tight grain (0 keeps it a true freeze) */
 punchVals[3]  = [0.5, 0.0625, 1.0, 1.0]; /* Chop:   1/4 grid, pattern 1 */
-punchVals[15] = [1.0, 0.5, 0.5, 0.0];   /* PalFX:  Veil reverb, half amount */
+punchVals[15] = [1.0, 0.5, 0.5, 0.0];   /* PalFX:  Veil reverb (the last effect), half amount */
 punchVals[3][0] = 0.7;                                 /* Chop: brisker default rate */
 const PUNCH_DEFAULTS = punchVals.map(a => a.slice());   /* Undo + pad restores these */
 const punchLfo = []; for (let i = 0; i < 16; i++) punchLfo.push([0, 0, 0.35, 0.35]);   /* [dest, shape, rate, depth] */
@@ -164,8 +195,7 @@ function punchLfoDisp(j, v) {
 const ROW_CCS = [MoveRow1, MoveRow2, MoveRow3, MoveRow4];   /* Track buttons 1..4 */
 const MENU_NAMES = ['Input', 'Perform', 'Send FX', 'Settings', 'Dynamic', 'Sessions', 'FX Seq', 'Drift'];
 const CHANCE_NAMES = ['Always','10%','20%','30%','40%','50%','60%','70%','80%','90%','LikeLast','P1 S1','P2 S1','S1 P1'];
-const PFX_NAMES = ['Off','Drive','Sweeten','Fuzz','Howl','Fold','Swell','Doubler','Vibrato','Phaser','Tremolo','Pitch','Shift',
-                   'Cascade','Reels','Collage','Reverse','Space','Bloom','Filter','Squash','Cassette','Broken','Interference','Halo','Plate','Quartz','Prism','Veil'];
+const PFX_NAMES = ['Off','Filter','Squash','Swell','Sweeten','Drive','Fuzz','Fold','Howl','Tremolo','Vibrato','Doubler','Phaser','Pitch','Shift','Ring','Cassette','Interference','Broken','Cascade','Reels','Reverse','Collage','Space','Bloom','Halo','Plate','Quartz','Prism','Veil'];   /* display order (0.9.6) - loopex.c PFX_ORDER must match */
 const PREAMP_NAMES = ['Tapeless','Clean','Cass1','Cass2','VHS1','VHS2','Reel15','Reel7','Reel3','4trk','Porta','Dub','Warp'];
 const MEQ_NAMES = ['Off','962','Air','SSL','Neve','Trident','Studer','API','Ampex','MPC','S950','SP12','Emu'];
 const MENU_DEFS = [
@@ -1236,7 +1266,7 @@ function drawKnobView() {
                                     : ((MENU_PAGE_NAMES[menu] && MENU_PAGE_NAMES[menu][menuPage]) || MENU_NAMES[menu]); scope = 'm' + menu;
                           footer = (menu === 5) ? [[String(sessSlot) + (sessSlot === sessCurrent ? '*' : ''), sessNames[sessSlot] ? prettySess(sessNames[sessSlot]) : 'empty'], ['Back', 'Exit']] : [['Back', 'Exit']]; }
     else if (inPunch)   { defs = null; title = 'Punch'; pageName = PUNCH_NAMES[punchActive]; scope = 'p' + punchActive;
-                          footer = [['Press', PUNCH_PRESS[punchActive]]]; }
+                          footer = [['Press', (punchActive === 15 && PFX_NAMES[Math.round(punchVals[15][0] * (PFX_NAMES.length - 1))] === 'Ring') ? 'speed' : PUNCH_PRESS[punchActive]]]; }
     else                { defs = PAGES[page()]; title = 'Track ' + (sel + 1) + ' ' + STATE_NAMES[voiceState[sel]]; pageName = PAGE_NAMES[page()]; scope = 't' + sel + 'p' + page();
                           footer = (page() === 3) ? [['Jog', jogHead >= 0 ? 'Head ' + (jogHead + 1) : 'Touch a head'], ['Up/Dn', 'Page']] : [['Jog', 'Scrub'], ['Up/Dn', 'Page']]; }
     /* a held knob takes the header over: full name + value, inverted (movyHeaderFor) */
@@ -1267,6 +1297,8 @@ function drawKnobView() {
             const j = i - 4, v = punchVals[punchActive][j], pe = punchEnum(punchActive, j);
             if (pe) drawEnumSquare(ctx, kx, ky, pe.disp(pe.fromVal(v)), 'p' + punchActive + ':' + i, pe.fromVal(v));
             else drawArcKnob(ctx, kx, ky, isFinite(v) ? v : 0);
+            if (!pe && heldPunch.indexOf(punchActive) >= 0) { const pt = punchPressTarget(punchActive);   /* pad held: pressure's reach on its knob */
+                if (pt && pt.j === j) drawPressRange(ctx, kx, ky, pt.at(0), pt.at(1), pt.at(padPress[punchActive] || 0)); }
             drawLabelCell(ctx, cellX, CELL_W, lblY, labelForCell(PUNCH_PARAMS[punchActive][j]),
                           caps(punchDisp(punchActive, j, v)), touched, touched);
             continue;
@@ -1762,7 +1794,7 @@ globalThis.onMidiMessageInternal = function (data) {
     if (status === 0xa0) {                          /* pad pressure -> punch intensity (per held effect) */
         if (d1 in NOTE_TO_RIGHT) { const i = NOTE_TO_RIGHT[d1];
             if (delPads.indexOf(i) >= 0) padPress[i] = d2 / 127;   /* pressure of a selected pad becomes the step's lock */
-            if (heldPunch.indexOf(i) >= 0 && !pressFrozen[i]) { padPress[i] = d2 / 127; if (padPress[i] > pressMax[i]) pressMax[i] = padPress[i]; sp('punchPress', i + ':' + padPress[i].toFixed(3)); } }
+            if (heldPunch.indexOf(i) >= 0 && !pressFrozen[i]) { padPress[i] = d2 / 127; if (padPress[i] > pressMax[i]) pressMax[i] = padPress[i]; sp('punchPress', i + ':' + padPress[i].toFixed(3)); if (i === punchActive) dirty = true; } }
         return;
     }
 

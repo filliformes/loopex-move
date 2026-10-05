@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.9.6 — unreleased
+
+### New Palette effect: Ring (sends and the PalFX punch pad)
+- **A ring modulator after two pedals:** the Fairfield Circuitry **Randy's Revenge** (an analog multiplier
+  on a sine or square carrier, a low-pass on the wet signal, a gritty input) and the Red Panda **Radius**
+  (a clean multiplier that slides into frequency shifting, and a carrier that moves). It sits with
+  Pitch and Shift in the effect list.
+- **Amount:** blends it in up to 70 %. Above that, the carrier bends from sine to square, the input
+  clips a little and the wet low-pass opens: at slow rates it chops, at audio rates it turns to bells and
+  lo-fi synth tones.
+- **Macro:** the carrier, 0.5 Hz to 4 kHz. Under about 40 Hz it slides from ring mod into an upward
+  frequency shift (fully shifted under 3 Hz), so slow settings phase and spin instead of only trembling.
+- **Drift:** moves the carrier. The first third is a slow wander, the middle is random semitone steps,
+  and the top third is an endless rising Shepard sweep (three carriers an octave apart).
+- **Stereo:** the right channel's carrier runs 90° ahead, so slow rates alternate left and right.
+- **On the PalFX punch pad, pressure sweeps Macro** (the carrier) from where the knob is up to the top,
+  instead of pushing Amount: press into a slow chop and it accelerates into bells. The footer says `speed`.
+
+### Fixes
+- **Pressure on the PalFX punch pad works.** It never reached the effect: the pad was always played at
+  its knob settings, whatever the pressure. It now pushes Amount (Macro on Ring), as documented.
+
+### Pressure shows on the knob it moves
+- **While you hold a punch pad, the knob its pressure drives shows how far pressure can take it:** an inner
+  arc marks the range, and a small notch rides along it as you press (after Charles Vestal's MonkSynth and
+  the Schwung knob grid). The knob's own pointer stays where you set it.
+- Each range is the effect's real pressure law: Loops subdivide down to ¼ on Rate, Chop and Mosaic go one
+  step up, Haze and Smear reach ×4 density, Strum speeds up, Oct−/Oct+ push Mix, Glide pushes Glide,
+  Shimmer pushes Regen, Stretch and Freeze push towards freeze, Reverse shortens Len, and PalFX pushes
+  Amount (Macro on Ring).
+
+### The Palette effects in a new order
+- **The list now reads like a pedalboard**, from shaping the sound to putting it in a room:
+
+  | Family | Effects |
+  |---|---|
+  | Tone & dynamics | Filter · Squash · Swell |
+  | Drive | Sweeten · Drive · Fuzz · Fold · Howl |
+  | Modulation | Tremolo · Vibrato · Doubler · Phaser |
+  | Pitch & frequency | Pitch · Shift · Ring |
+  | Lo-fi | Cassette · Interference · Broken |
+  | Delays | Cascade · Reels · Reverse · Collage |
+  | Textures | Space · Bloom · Halo |
+  | Reverbs | Plate · Quartz · Prism · Veil |
+
+- **Nothing you saved changes sound.** Sends are stored by name. The PalFX pad's effect knob (and its
+  FX-sequencer locks) is converted on load from 0.9.5 and earlier, so every pad keeps its effect. Veil is
+  still last, and still the PalFX default.
+
 ## v0.9.5 — 2026-09-23
 
 The biggest change to how Loopex is *played* since the Overtake conversion. It adds a **SYNC** mode

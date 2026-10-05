@@ -1618,6 +1618,21 @@ static inline double punch_beat(void){
     double bpm=(g_host&&g_host->get_bpm)?(double)g_host->get_bpm():120.0; if(bpm<20.0)bpm=120.0;
     return SR*60.0/bpm;
 }
+/* The order the Palette effects are SHOWN and TURNED in (0.9.6): tone and dynamics, drive, modulation, pitch
+ * and frequency, lo-fi, delays, textures, reverbs. The engine keeps its own ids (palette_fx.c PFX_*); the
+ * sends are saved by name, and the PalFX punch knob is a position in THIS list (pfx_pos_id). */
+static const char *const PFX_ORDER[PFX_NUM]={"Off","Filter","Squash","Swell","Sweeten","Drive","Fuzz","Fold","Howl",
+    "Tremolo","Vibrato","Doubler","Phaser","Pitch","Shift","Ring","Cassette","Interference","Broken",
+    "Cascade","Reels","Reverse","Collage","Space","Bloom","Halo","Plate","Quartz","Prism","Veil"};
+static int pfxOrdId[PFX_NUM], pfxIdPos[PFX_NUM], pfxOrdReady, pfxRingId=-1;
+static void pfx_order_init(void){
+    if(pfxOrdReady) return;
+    for(int p=0;p<PFX_NUM;p++){ int id=0; for(int i=0;i<PFX_NUM;i++) if(strcmp(pfx_name(i),PFX_ORDER[p])==0){ id=i; break; }
+        pfxOrdId[p]=id; pfxIdPos[id]=p; if(strcmp(PFX_ORDER[p],"Ring")==0) pfxRingId=id; }
+    pfxOrdReady=1;
+}
+static inline int pfx_pos_id(float v){ int p=(int)(v*(float)(PFX_NUM-1)+0.5f); if(p<0)p=0; if(p>=PFX_NUM)p=PFX_NUM-1; return pfxOrdId[p]; }
+
 /* SYNC note values, in beats: 1/32 .. 2 bars, triplets included. */
 static const double NV_B[11]={0.125,1.0/6.0,0.25,1.0/3.0,0.5,2.0/3.0,1.0,4.0/3.0,2.0,4.0,8.0};
 /* The note value nearest b (in log - so 1/8T sits between 1/16 and 1/8), no longer than maxB. */
@@ -1767,7 +1782,7 @@ static void fxseq_apply(loopex_t *s, int idx){
     for(int p=0;p<NUM_PUNCH;p++) if(f->seqHeld[p]&&!keep[p]){ f->seqHeld[p]=0; if(!f->userHeld[p]) punch_off(s,p); }
     if(trig) for(int k=0;k<st->n&&k<FXSEQ_MAXPADS;k++){ int p=st->pad[k]&15;
         memcpy(s->punchParams[p],st->lock[k],sizeof st->lock[k]); s->punchPress[p]=st->press[k];
-        if(PUNCH_DEFS[p].mech==PM_PALETTE){ int id=(int)(st->lock[k][0]*(PFX_NUM-1)+0.5f); if(id<0)id=0; if(id>=PFX_NUM)id=PFX_NUM-1;
+        if(PUNCH_DEFS[p].mech==PM_PALETTE){ int id=pfx_pos_id(st->lock[k][0]);
             if(id!=s->punchFxId){ s->punchFxId=id; atomic_store(&s->fxSel[2],id); } }
         if(!f->userHeld[p]) punch_on(s,p);                        /* retriggers a running one, as a finger would */
         f->seqHeld[p]=1; }
@@ -1858,12 +1873,14 @@ static inline void punch_slot_process(loopex_t *s, PunchSlot *ps, int n, double 
     const PunchDef *d=&PUNCH_DEFS[ps->idx];
     for(int j=0;j<4;j++) ps->pSm[j]+=(s->punchParams[ps->idx][j]-ps->pSm[j])*0.004f;   /* ~6 ms: knob detents do not step the sound */
     float *P=ps->pSm; int toneOn=(P[2]<0.98f);
-    if(d->mech==PM_PALETTE){   /* one Palette effect as a punch: this block in, last block out */
-        ps->pinL[n]=ps->ringL[ps->w]; ps->pinR[n]=ps->ringR[ps->w];
-        *outL=(double)ps->poutL[n]; *outR=(double)ps->poutR[n]; return; }
+    /* Pressure first: the PalFX pad returns just below, and its block processing reads pressSm too
+     * (it used to be skipped, so PalFX pressure never did anything). */
     { double pt=(double)s->punchPress[ps->idx];
       if(s->sync) ps->pressSm+=(pt-ps->pressSm)*0.002;                             /* ~11 ms: SYNC steps it anyway */
       else ps->pressSm+=(pt-ps->pressSm)*((pt>ps->pressSm)?0.0015:0.00035); }      /* ASYNC: in ~15 ms, blooms out over ~65 ms */
+    if(d->mech==PM_PALETTE){   /* one Palette effect as a punch: this block in, last block out */
+        ps->pinL[n]=ps->ringL[ps->w]; ps->pinR[n]=ps->ringR[ps->w];
+        *outL=(double)ps->poutL[n]; *outR=(double)ps->poutR[n]; return; }
     double press=ps->pressSm;
     /* per-effect LFO (knobs 1-4 = dest, shape, speed, depth): modulates one fx param */
     { const float *Lf=s->punchLfo[ps->idx]; int dest=(int)(Lf[0]*4.99f);
@@ -2536,6 +2553,7 @@ static inline void poly_sample(loopex_t *s, double *mixL, double *mixR, double *
 #define DRIFT_N 4
 static const int DRIFT_LEN[DRIFT_N] = { 24001, 41011, 62003, 89017 };  /* ~0.54/0.93/1.41/2.02 s, coprime line lengths */
 static void *create_instance(const char *module_dir, const char *json_defaults) {
+    pfx_order_init();
     (void)module_dir;(void)json_defaults;
     loopex_t *s=(loopex_t*)calloc(1,sizeof(loopex_t));if(!s)return NULL;
     for(int i=0;i<NUM_VOICES;i++){Voice *v=&s->voice[i];
@@ -2564,6 +2582,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     atomic_store(&s->waveReq,0); atomic_store(&s->waveRdy,-1); s->waveOutTrack[0]=s->waveOutTrack[1]=-1;   /* C3 plays the loop at its recorded speed */
     for(int i=0;i<NUM_PSLOTS;i++){s->pslot[i].idx=-1;bq_reset(&s->pslot[i].toneFilt);}
     for(int i=0;i<NUM_PUNCH;i++){s->punchParams[i][0]=0.5f;s->punchParams[i][1]=0.5f;s->punchParams[i][2]=1.0f;s->punchParams[i][3]=1.0f;s->punchPress[i]=0.0f;}
+    s->punchParams[15][0]=1.0f;   /* PalFX: Veil, the last effect in the list, as the UI default */
     s->inLow=0.0f;s->inMid=0.0f;s->inMidFreq=0.5f;s->inHigh=0.0f;s->inHighFreq=0.748f;   /* 0.748 on the log sweep = 10 kHz, the 424's shelf */
     s->inLowFreq=0.39794f;   /* 40*10^0.398 = 100 Hz, the 424's shelf */
     s->dynMode=0;s->dynSense=0.5f;s->dynSize=8;s->dynSpread=16;   /* defaults: Size = Free (record until quiet), Spread = all 16 pads */s->dynError=0.0f;s->dynSustain=1.0f;
@@ -3689,8 +3708,10 @@ static void render_block(void *inst, int16_t *out_interleaved_lr, int frames) {
     /* Palette punch slot: process the block it captured, ready for the next one */
     for(int si=0;si<NUM_PSLOTS;si++){ PunchSlot *ps=&s->pslot[si]; if(ps->idx<0||PUNCH_DEFS[ps->idx].mech!=PM_PALETTE)continue;
         memcpy(ps->poutL,ps->pinL,sizeof ps->poutL); memcpy(ps->poutR,ps->pinR,sizeof ps->poutR);
-        float *P=ps->pSm; float amt=P[1]+(1.0f-P[1])*(float)ps->pressSm;   /* pressure pushes Amount */
-        if(s->punchFx&&!atomic_load(&s->fxBusy[2])) pfx_process(s->punchFx,ps->poutL,ps->poutR,frames,amt,P[2],P[3]);
+        float *P=ps->pSm, amt=P[1], mac=P[2];
+        if(s->punchFxId==pfxRingId) mac=P[2]+(1.0f-P[2])*(float)ps->pressSm;   /* Ring: pressure sweeps Macro (the carrier) from the knob to the top */
+        else amt=P[1]+(1.0f-P[1])*(float)ps->pressSm;                                            /* the rest: pressure pushes Amount */
+        if(s->punchFx&&!atomic_load(&s->fxBusy[2])) pfx_process(s->punchFx,ps->poutL,ps->poutR,frames,amt,mac,P[3]);
         else { memset(ps->poutL,0,sizeof ps->poutL); memset(ps->poutR,0,sizeof ps->poutR); } }
 
     /* Decay input peak meters (~50ms decay) */
@@ -3791,6 +3812,19 @@ static void set_param(void *inst, const char *key, const char *val) {
             if(strstr(val,"tapeLoCut=")&&s->tapeLoCut>0.01f){ snprintf(b,sizeof b,"%.5f",log((20.0+(double)s->tapeLoCut*780.0)/20.0)/log(40.0)); set_param(inst,"tapeLoCut",b); }
             if(strstr(val,"inHighFreq=")){ snprintf(b,sizeof b,"%.5f",log((3000.0+(double)s->inHighFreq*12000.0)/3000.0)/log(5.0)); set_param(inst,"inHighFreq",b); }
             if(strstr(val,"inLow=")){ snprintf(b,sizeof b,"%.5f",log10(3.0)); set_param(inst,"inLowFreq",b); }   /* 40*10^0.477 = 120 Hz */
+        }
+        /* Before 0.9.6 the PalFX punch knob (pad 16, knob 5) was an engine id spread over 29 effects (0..28).
+         * Now it is a position in PFX_ORDER over 30. Re-place the stored effect by identity - Veil stays Veil -
+         * in the pad's own setting and in every FX-sequencer lock of that pad. (A 0.9.6 dev build wrote
+         * pfxv=30: an engine id over 30.) */
+        if(!strstr(val,"pfxo=") && strstr(val,"pfx15=")){ float span=strstr(val,"pfxv=")?(float)(PFX_NUM-1):28.0f; char b[48];
+            #define PFX_REMAP(x) ({ int _id=(int)((x)*span+0.5f); if(_id<0)_id=0; if(_id>=PFX_NUM)_id=PFX_NUM-1; (float)pfxIdPos[_id]/(float)(PFX_NUM-1); })
+            snprintf(b,sizeof b,"15:0:%.6f",(double)PFX_REMAP(s->punchParams[15][0])); set_param(inst,"pfx",b);
+            for(int i=0;i<FXSEQ_STEPS;i++){ FxStep *st=&s->fx.st[i];
+                for(int k=0;k<st->n&&k<FXSEQ_MAXPADS;k++) if(st->pad[k]==15) st->lock[k][0]=PFX_REMAP(st->lock[k][0]); }
+            #undef PFX_REMAP
+        }
+        if(!strstr(val,"inLowFreq=")){
             if(strstr(val,"v0.end="))   /* 0.9.1's End was a fraction of what was left after Start; now it is a length */
                 for(int i=0;i<NUM_VOICES;i++){ Voice *vv=&s->voice[i]; vv->loopEnd=lb_clampf(vv->loopEnd*(1.0f-vv->loopStart),0,1); } }
         return;
@@ -3839,7 +3873,7 @@ static void set_param(void *inst, const char *key, const char *val) {
     if(strcmp(key,"pfx")==0){ int idx=atoi(val); const char *c1=strchr(val,':'); if(!c1)return; int p=atoi(c1+1);
         const char *c2=strchr(c1+1,':'); if(!c2)return; float v=lb_clampf((float)atof(c2+1),0.0f,1.0f);
         if(idx>=0&&idx<NUM_PUNCH&&p>=0&&p<4){ s->punchParams[idx][p]=v;
-            if(p==0){ if(PUNCH_DEFS[idx].mech==PM_PALETTE){ int id=(int)(v*(PFX_NUM-1)+0.5f); if(id<0)id=0; if(id>=PFX_NUM)id=PFX_NUM-1; if(id!=s->punchFxId){ s->punchFxId=id; atomic_store(&s->fxSel[2],id); } }
+            if(p==0){ if(PUNCH_DEFS[idx].mech==PM_PALETTE){ int id=pfx_pos_id(v); if(id!=s->punchFxId){ s->punchFxId=id; atomic_store(&s->fxSel[2],id); } }
                       else for(int i=0;i<NUM_PSLOTS;i++) if(s->pslot[i].idx==idx) punch_slot_retune(s,&s->pslot[i],idx); } }
         return; }
     /* State restore for punch params: "pfx0" .. "pfx15" = "rate,pitch,tone,mix" */
@@ -4107,11 +4141,11 @@ static const char *CHAIN_PARAMS_JSON =
     "{\"key\":\"globalWowFlut\",\"name\":\"W/Flut\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"inputMonitor\",\"name\":\"InMon\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"masterVol\",\"name\":\"Out\",\"type\":\"float\",\"min\":0,\"max\":1.5,\"step\":0.01},"
-    "{\"key\":\"sendAType\",\"name\":\"A Fx\",\"type\":\"enum\",\"options\":[\"Off\",\"Drive\",\"Sweeten\",\"Fuzz\",\"Howl\",\"Fold\",\"Swell\",\"Doubler\",\"Vibrato\",\"Phaser\",\"Tremolo\",\"Pitch\",\"Shift\",\"Cascade\",\"Reels\",\"Collage\",\"Reverse\",\"Space\",\"Bloom\",\"Filter\",\"Squash\",\"Cassette\",\"Broken\",\"Interference\",\"Halo\",\"Plate\",\"Quartz\",\"Prism\",\"Veil\"]},"
+    "{\"key\":\"sendAType\",\"name\":\"A Fx\",\"type\":\"enum\",\"options\":[\"Off\",\"Filter\",\"Squash\",\"Swell\",\"Sweeten\",\"Drive\",\"Fuzz\",\"Fold\",\"Howl\",\"Tremolo\",\"Vibrato\",\"Doubler\",\"Phaser\",\"Pitch\",\"Shift\",\"Ring\",\"Cassette\",\"Interference\",\"Broken\",\"Cascade\",\"Reels\",\"Reverse\",\"Collage\",\"Space\",\"Bloom\",\"Halo\",\"Plate\",\"Quartz\",\"Prism\",\"Veil\"]},"
     "{\"key\":\"sendAM1\",\"name\":\"A Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"sendAM2\",\"name\":\"A Mac\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"sendADrift\",\"name\":\"A Drf\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-    "{\"key\":\"sendBType\",\"name\":\"B Fx\",\"type\":\"enum\",\"options\":[\"Off\",\"Drive\",\"Sweeten\",\"Fuzz\",\"Howl\",\"Fold\",\"Swell\",\"Doubler\",\"Vibrato\",\"Phaser\",\"Tremolo\",\"Pitch\",\"Shift\",\"Cascade\",\"Reels\",\"Collage\",\"Reverse\",\"Space\",\"Bloom\",\"Filter\",\"Squash\",\"Cassette\",\"Broken\",\"Interference\",\"Halo\",\"Plate\",\"Quartz\",\"Prism\",\"Veil\"]},"
+    "{\"key\":\"sendBType\",\"name\":\"B Fx\",\"type\":\"enum\",\"options\":[\"Off\",\"Filter\",\"Squash\",\"Swell\",\"Sweeten\",\"Drive\",\"Fuzz\",\"Fold\",\"Howl\",\"Tremolo\",\"Vibrato\",\"Doubler\",\"Phaser\",\"Pitch\",\"Shift\",\"Ring\",\"Cassette\",\"Interference\",\"Broken\",\"Cascade\",\"Reels\",\"Reverse\",\"Collage\",\"Space\",\"Bloom\",\"Halo\",\"Plate\",\"Quartz\",\"Prism\",\"Veil\"]},"
     "{\"key\":\"sendBM1\",\"name\":\"B Amt\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"sendBM2\",\"name\":\"B Mac\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
     "{\"key\":\"sendBDrift\",\"name\":\"B Drf\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
@@ -4321,6 +4355,7 @@ static int get_param(void *inst, const char *key, char *buf, int buf_len) {
         #define WF(k,val) APP("%s=%.4f\n",k,(double)(val))
         #define WI(k,val) APP("%s=%d\n",k,(int)(val))
         #define WS(k,val) APP("%s=%s\n",k,(val))
+        WI("pfxo",1);   /* the PalFX knob is a position in PFX_ORDER (0.9.6); older states held an engine id over 29 */
         WF("globalSat",s->globalSat);WF("masterComp",s->masterComp);
         WI("masterLoCut",(int)s->masterLoCut);WI("masterHiCut",(int)s->masterHiCut);
         WI("preamp",(int)s->preamp);WI("overdubMode",(int)s->overdubMode);

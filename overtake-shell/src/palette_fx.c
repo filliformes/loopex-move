@@ -36,7 +36,8 @@ enum {
     PFX_PLATE,              /* Dattorro plate reverb (own state pool, appended) */
     PFX_QUARTZ, PFX_PRISM,  /* dual-mode Hadamard 8-line FDN (Res / Essaim port, shared pool) */
     PFX_VEIL,               /* modulated Householder FDN (Phasma port, own pool) */
-    PFX_COUNT               /* = 29 (Off + 24 + Plate + Quartz + Prism + Veil) */
+    PFX_RING,               /* ring modulator (Randy's Revenge x Radius), appended in 0.9.6 */
+    PFX_COUNT               /* = 30 (Off + 24 + Plate + Quartz + Prism + Veil + Ring) */
 };
 
 static const char *FX_NAMES[PFX_COUNT] = {
@@ -45,7 +46,7 @@ static const char *FX_NAMES[PFX_COUNT] = {
     "Doubler","Vibrato","Phaser","Tremolo","Pitch","Shift",
     "Cascade","Reels","Collage","Reverse","Space","Bloom",
     "Filter","Squash","Cassette","Broken","Interference","Halo",
-    "Plate","Quartz","Prism","Veil"
+    "Plate","Quartz","Prism","Veil","Ring"
 };
 
 extern void *pfx_clouds_alloc(int fx_id, float sr);
@@ -1302,6 +1303,80 @@ static void fx_veil(slot_dsp_t *dsp, float *l, float *r, int n,
     }
 }
 
+/* RING — a ring modulator after two pedals (Loopex 0.9.6).
+ *  Fairfield Circuitry Randy's Revenge: an analog four-quadrant multiplier on a sine OR square VCO, with a
+ *    2nd-order low-pass on the wet signal only and a JFET input that clips "tube-like". At low rates the
+ *    square chops (polarity flips cancel the dry); at audio rates, bells and low-fi synth tones.
+ *  Red Panda Radius: a clean digital multiplier with no carrier bleed, a ring mod that slides into a
+ *    single-sideband frequency shift (phaser / barber-pole at low carriers), and a carrier that moves:
+ *    random steps (sample-and-hold) and the X+ endless Shepard glissando.
+ *  Amount: 0-0.7 equal-power dry/wet with the wet low-pass opening (1.5 -> 12 kHz); 0.7-1 the Randy side -
+ *    the carrier bends from sine to square, the input clips and a little carrier-free bleed comes through.
+ *  Macro:  carrier 0.5 Hz - 4 kHz (log). Below ~40 Hz the sine path slides from ring mod to an upward
+ *    frequency shift (fully shifted under 3 Hz): slow settings phase and spin instead of only trembling.
+ *  Drift:  carrier motion. 0-1/3 a slow triangle wander (up to +-1/2 octave), 1/3-2/3 random semitone
+ *    steps (sample-and-hold, up to +-1 octave, faster as it rises), 2/3-1 an endless rising Shepard sweep
+ *    (three carriers an octave apart, faded in and out over three octaves).
+ *  Stereo: the right channel's carrier is in quadrature (90 deg), so low rates alternate L/R.
+ *  State: lfo/lfo2/lfo3 carrier phases, f4 motion phase, f2/f3 S&H target/glide, f5 Shepard position,
+ *  sm1 smoothed log2 carrier, z1-z2 wet low-pass, hil[] the Warps Hilbert pair (shared with SHIFT). */
+static void fx_ring(slot_dsp_t *s, float *l, float *r, int n,
+                    float amount, float macro, float drift){
+    float A=clampf(amount,0.0f,1.0f), D=clampf(drift,0.0f,1.0f), M=clampf(macro,0.0f,1.0f);
+    float mix =(A<0.7f)? A/0.7f : 1.0f;
+    float dirt=(A>0.7f)? (A-0.7f)/0.3f : 0.0f;
+    float gDry=cosf(mix*1.5707963f), gWet=sinf(mix*1.5707963f);
+    float lpc=1.0f-expf(-TWO_PI*1500.0f*powf(8.0f,A)/SR);
+    float tgt=-1.0f + M*12.9658f;                         /* log2 Hz: 0.5 Hz .. 4 kHz */
+    float k=1.0f+3.0f*dirt, kin=1.0f/sqrtf(k);            /* input grit, roughly level-kept */
+    int shep=(D>=0.6667f);
+    if(s->sm1<-2.0f||s->sm1>13.0f) s->sm1=tgt;
+    for(int i=0;i<n;i++){
+        float mo=0.0f;                                     /* carrier motion, octaves */
+        if(D<0.3333f){ float t=D*3.0f;
+            s->f4+=(0.15f+1.35f*t)/SR; if(s->f4>=1.0f)s->f4-=1.0f;
+            mo=(4.0f*fabsf(s->f4-0.5f)-1.0f)*0.5f*t; }
+        else if(!shep){ float t=(D-0.3333f)*3.0f;
+            s->f4+=(0.5f+5.5f*t)/SR;
+            if(s->f4>=1.0f){ s->f4-=1.0f; s->f2=roundf((frand(&s->seed)*2.0f-1.0f)*12.0f*(0.25f+0.75f*t))/12.0f; }
+            s->f3+=(s->f2-s->f3)*0.02f; mo=s->f3; }
+        else { float t=(D-0.6667f)*3.0f;
+            s->f5+=(0.03f+0.3f*t)/SR; if(s->f5>=1.0f)s->f5-=1.0f; }
+        s->sm1+=(tgt+mo-s->sm1)*0.0015f;                  /* ~15 ms: knob detents and steps glide */
+        float C=0.0f, S=0.0f;
+        if(!shep){
+            s->lfo+=exp2f(s->sm1)/SR; if(s->lfo>=1.0f)s->lfo-=1.0f;
+            C=cosf(s->lfo*TWO_PI); S=sinf(s->lfo*TWO_PI);
+        } else {
+            float *ph[3]={&s->lfo,&s->lfo2,&s->lfo3};
+            for(int c=0;c<3;c++){ float o=(float)(c-1)+s->f5;                 /* -1 .. +2 octaves */
+                float w=0.5f-0.5f*cosf(TWO_PI*(o+1.0f)/3.0f);                  /* faded in/out over the span */
+                *ph[c]+=exp2f(s->sm1+o)/SR; if(*ph[c]>=1.0f)*ph[c]-=floorf(*ph[c]);
+                C+=w*cosf(*ph[c]*TWO_PI); S+=w*sinf(*ph[c]*TWO_PI); }
+            C*=0.6667f; S*=0.6667f;                        /* the three weights always sum to 1.5 */
+        }
+        float sh=(5.3219f-s->sm1)/(5.3219f-1.585f);      /* log2 40 Hz .. log2 3 Hz */
+        sh=clampf(sh,0.0f,1.0f); sh=sh*sh*(3.0f-2.0f*sh)*(1.0f-dirt);
+        for(int ch=0;ch<2;ch++){
+            float x=(ch?r:l)[i];
+            float Cc=ch? -S : C, Sc=ch? C : S;             /* right: carrier 90 deg ahead */
+            float xg=(dirt>0.0f)? sb_tanh(x*k)*kin : x;
+            float sq=sb_tanh(Cc*6.0f);
+            float car=Cc+(sq-Cc)*dirt;
+            float wv=xg*car*(1.4142f-0.4142f*dirt);         /* sine ring is -3 dB: make it up */
+            if(sh>0.001f){
+                float *H=&s->hil[ch*34]; float iv=0.0f, qv=0.0f;
+                for(int q=0;q<17;q++){ float coef=-lut_ap_poles[q]; float *dst=(q&1)?&qv:&iv;
+                    float src=(q<=1)?xg:*dst; *dst=warps_ap(&H[q*2],src,coef); }
+                float ssb=iv*Cc-qv*Sc;
+                wv+=(ssb-wv)*sh; }
+            wv+=xg*0.06f*dirt;                             /* the multiplier's bleed */
+            if(ch){ s->z1r+=lpc*(wv-s->z1r)+DENORM; s->z2r+=lpc*(s->z1r-s->z2r)+DENORM; r[i]=x*gDry+s->z2r*gWet; }
+            else  { s->z1l+=lpc*(wv-s->z1l)+DENORM; s->z2l+=lpc*(s->z1l-s->z2l)+DENORM; l[i]=x*gDry+s->z2l*gWet; }
+        }
+    }
+}
+
 static const palette_effect_t FX_TABLE[PFX_COUNT] = {
     [PFX_OFF]          = { fx_passthrough,   NULL },
     [PFX_DRIVE]        = { fx_drive,         NULL },
@@ -1332,6 +1407,7 @@ static const palette_effect_t FX_TABLE[PFX_COUNT] = {
     [PFX_QUARTZ]       = { fx_quartz,        NULL },  /* modulated 8-line FDN, dual-band damping */
     [PFX_PRISM]        = { fx_prism,         NULL },  /* same tank, frequency-dependent decay   */
     [PFX_VEIL]         = { fx_veil,          NULL },  /* Householder tank, modulated diffusers  */
+    [PFX_RING]         = { fx_ring,          NULL },  /* Randy's Revenge x Radius ring modulator */
 };
 
 

@@ -66,8 +66,10 @@ FXSEQ_STEPS 16             NUM_SLOTS 64      MF_NVOICE 12    DRIFT_N 4
 - **DJ filter** — LP left (analog voicing via `mf_run`, 12 models) / HP right (biquad). Both
   crossfade to dry across ±0.08 of centre and **the engine swap is deferred until the wet blend
   reaches ~0** (`djWet`/`djWetTgt`) → pop-free at any sweep speed.
-- **Palette sends** — two buses, `Off` + 24 effects + 4 reverbs (Plate/Quartz/Prism/Veil) =
-  `PFX_COUNT` 29; block-processed, 1-block latency; effect swaps go through the worker and
+- **Palette sends** — two buses, `Off` + 24 effects + 4 reverbs (Plate/Quartz/Prism/Veil) + Ring (0.9.6) =
+  `PFX_COUNT` 30. **Display order** (0.9.6) is `PFX_ORDER` in loopex.c (mirrored by ui.js `PFX_NAMES` and the
+  sendA/BType chain_params options); engine ids are unchanged. Sends save by name; the PalFX knob is a
+  POSITION in PFX_ORDER (`pfx_pos_id`), state marker `pfxo=1`, older states remapped by id on load; block-processed, 1-block latency; effect swaps go through the worker and
   **morph** (outgoing fades as incoming fades in); every effect is level-matched to its dry.
 - **Punch-in FX** — 16 pads, **per-sample, zero-latency, up to 5 in series** over a 2 s ring.
   Stretch/Freeze is a 4-grain wander-wash (randomised lengths + backward wander + per-grain
@@ -274,7 +276,7 @@ overtake-shell/
   module.json              Overtake manifest (id / capabilities / version)
   src/
     loopex.c               the engine: voices, playheads, punch FX, Stumble, Drift, sessions, master
-    palette_fx.c/.h        Palette send engine (Off + 24 effects + 4 reverbs)
+    palette_fx.c/.h        Palette send engine (Off + 24 effects + 4 reverbs + Ring)
     fx_clouds.cc           Clouds-based Space / Bloom (C++)
     pitch_shift.cc         Signalsmith Stretch wrapper (per-loop Pitch)
     warps_data.c           Warps wavetables (Fold / Shift)
@@ -323,6 +325,6 @@ Any user-visible change must land in **all** of these before it's finished:
    existing CSS classes, no new dependencies.
 4. **`CLAUDE.md`** (this file) — if the architecture, params, surface or constraints moved.
 
-Counts must agree across all four (e.g. **24 Palette effects + 4 reverbs**, **32** Chop patterns,
+Counts must agree across all four (e.g. **24 Palette effects + 4 reverbs + Ring = 30 incl. Off**, **32** Chop patterns,
 **64** session slots, **5** loop pages, **13** tape models, **13** Character voicings). Push the
 docs with the code, and add the release to `docs/CHANGELOG.md`.

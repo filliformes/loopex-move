@@ -76,12 +76,22 @@ Navigate with **Down** (next) and **Up** (previous).
   top an 8-second loop collapses in about a minute, in the middle in about twenty.
 
 ### Two send buses — the Palette engine
-Send A and B each select from **29 effects** (Off + 24 Palette effects + four reverbs):
-Drive, Sweeten, Fuzz, Howl, Fold, Swell, Doubler, Vibrato, Phaser, Tremolo, Pitch, Shift,
-Cascade, Reels, Collage, Reverse, Space, Bloom, Filter, Squash, Cassette, Broken,
-Interference, Halo, **Plate**, **Quartz**, **Prism**, **Veil** — each with Amount / Macro / Drift.
+Send A and B each select from **30 effects** (Off + 24 Palette effects + Ring + four reverbs), each
+with Amount / Macro / Drift, listed like a pedalboard — shape, drive, move, bend, wear out, repeat,
+smear, then a room:
 
-The last four are proper reverbs, and the last three come from the standalone instruments:
+| Family | Effects |
+|---|---|
+| Tone & dynamics | Filter · Squash · Swell |
+| Drive | Sweeten · Drive · Fuzz · Fold · Howl |
+| Modulation | Tremolo · Vibrato · Doubler · Phaser |
+| Pitch & frequency | Pitch · Shift · **Ring** |
+| Lo-fi | Cassette · Interference · Broken |
+| Delays | Cascade · Reels · Reverse · Collage |
+| Textures | Space · Bloom · Halo |
+| Reverbs | **Plate** · **Quartz** · **Prism** · **Veil** |
+
+Plate, Quartz, Prism and Veil are proper reverbs, and the last three come from the standalone instruments:
 
 | | Tank | Amount | Macro | Drift |
 |---|---|---|---|---|
@@ -89,6 +99,16 @@ The last four are proper reverbs, and the last three come from the standalone in
 | **Quartz** | 8-line Hadamard FDN, dual-band damping | room → hall | dark → bright | still → swimming |
 | **Prism** | same tank, frequency-dependent decay | decay | lows ring ⇄ highs shimmer | crossover + movement |
 | **Veil** | Householder FDN, modulated diffusers | size + tail | dark → bright | movement + colour |
+
+**Ring** is a ring modulator after two pedals: the Fairfield Circuitry Randy's Revenge (a sine or
+square carrier, a low-pass on the wet, gritty input) and the Red Panda Radius (a clean multiplier that
+slides into frequency shifting at slow rates, and a carrier that moves). **Amount** blends it in up to
+70 %, then turns the carrier from sine to square, adds input grit and opens the wet filter: slow
+settings chop, fast ones turn to bells. **Macro** is the carrier, 0.5 Hz to 4 kHz; under ~40 Hz it slides
+from ring mod into an upward frequency shift, so slow settings phase and spin instead of only
+trembling. **Drift** moves the carrier: a slow wander (first third), random semitone steps (middle),
+then an endless rising Shepard sweep. The right channel's carrier runs 90° ahead, so slow rates
+alternate left and right.
 
 Every effect is loudness-matched to the dry signal it replaces (the Character family used to sit
 many dB apart), and **switching effects morphs** — the outgoing one fades as the incoming one fades
@@ -99,7 +119,7 @@ Sixteen momentary effects over a 2-second capture ring, in four families —
 **Loops** (1/12 · 1/16 · short · **Chop**, with 32 rhythmic patterns drawn from Signal),
 **Grains** (Haze · Mosaic · Smear · Strum), **Pitch** (Oct− · Oct+ · Glide · Shimmer) and
 **Time** (Stretch · Freeze · Reverse · **PalFX**, one Palette effect as a punch: FX / Amount /
-Macro / Drift, default Space) — **up to 5 stacked in series**. Slice effects auto-pan in
+Macro / Drift, default Veil; pressure pushes Amount, or on Ring sweeps Macro) — **up to 5 stacked in series**. Slice effects auto-pan in
 sync with their rate, and every slot loudness-matches its wet to the dry it replaces. The grain
 effects draw on a 16-grain pool with voice stealing and window-power normalisation.
 **Oct+, Oct−, Shimmer and Chop are spread to stereo by a microshifter**, the same widener
@@ -511,6 +531,10 @@ license (see `overtake-shell/vendor/` and the file headers); the rest is inspira
   equaliser) in the 1.960.221 input unit. Bass and Treble corners and slopes are a least-squares
   fit to the response curves printed in the service manual (§1.7.2 / D 3/3), digitised off the
   plot; Mid follows the published Q = 1, 150 Hz–7 kHz, ±11 dB presence spec.
+- **Fairfield Circuitry Randy's Revenge** — the Ring effect's analog side: a sine or square carrier,
+  a low-pass on the wet signal and a gritty input; slow square = chop. https://fairfieldcircuitry.com/products/randys-revenge
+- **Red Panda Radius** — the Ring effect's digital side: a clean multiplier that slides into frequency
+  shifting, random-step carriers and the endless Shepard sweep. https://www.redpandalab.com/products/radius
 - **Tascam 424 MkII / MkIII Portastudio** — the other half of the Input EQ: its ±15 dB shelves with the
   sweepable 100 Hz low corner and the 10 kHz high shelf, taken from the owner's manual and blended with
   the Studer 962 presence band.

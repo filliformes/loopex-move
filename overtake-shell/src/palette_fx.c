@@ -1318,7 +1318,7 @@ static void fx_veil(slot_dsp_t *dsp, float *l, float *r, int n,
  *    steps (sample-and-hold, up to +-1 octave, faster as it rises), 2/3-1 an endless rising Shepard sweep
  *    (three carriers an octave apart, faded in and out over three octaves).
  *  Stereo: the right channel's carrier is in quadrature (90 deg), so low rates alternate L/R.
- *  State: lfo/lfo2/lfo3 carrier phases, f4 motion phase, f2/f3 S&H target/glide, f5 Shepard position,
+ *  State: f1 single-carrier phase, lfo/lfo2/lfo3 Shepard phases, f6 Shepard crossfade, i1 set-up, i3 Hilbert live, f4 motion phase, f2/f3 S&H target/glide, f5 Shepard position,
  *  sm1 smoothed log2 carrier, z1-z2 wet low-pass, hil[] the Warps Hilbert pair (shared with SHIFT). */
 static void fx_ring(slot_dsp_t *s, float *l, float *r, int n,
                     float amount, float macro, float drift){
@@ -1328,9 +1328,11 @@ static void fx_ring(slot_dsp_t *s, float *l, float *r, int n,
     float gDry=cosf(mix*1.5707963f), gWet=sinf(mix*1.5707963f);
     float lpc=1.0f-expf(-TWO_PI*1500.0f*powf(8.0f,A)/SR);
     float tgt=-1.0f + M*12.9658f;                         /* log2 Hz: 0.5 Hz .. 4 kHz */
-    float k=1.0f+3.0f*dirt, kin=1.0f/sqrtf(k);            /* input grit, roughly level-kept */
+    float k=1.0f+3.0f*dirt, kin=1.0f/k;                   /* input grit: unity for small signals, only peaks are squashed */
     int shep=(D>=0.6667f);
-    if(s->sm1<-2.0f||s->sm1>13.0f) s->sm1=tgt;
+    if(!s->i1||s->sm1<-2.0f||s->sm1>13.0f){ s->sm1=tgt; s->i1=1; }   /* i1: set up (pfx_slot_reset clears it) */
+    /* f6 = how much of the Shepard sweep is heard. It glides (~10 ms) when Drift crosses 2/3, so the single carrier
+     * (phase f1) and the sweep's three (lfo, lfo2, lfo3) crossfade instead of switching. */
     for(int i=0;i<n;i++){
         float mo=0.0f;                                     /* carrier motion, octaves */
         if(D<0.3333f){ float t=D*3.0f;
@@ -1341,19 +1343,24 @@ static void fx_ring(slot_dsp_t *s, float *l, float *r, int n,
             if(s->f4>=1.0f){ s->f4-=1.0f; s->f2=roundf((frand(&s->seed)*2.0f-1.0f)*12.0f*(0.25f+0.75f*t))/12.0f; }
             s->f3+=(s->f2-s->f3)*0.02f; mo=s->f3; }
         else { float t=(D-0.6667f)*3.0f;
-            s->f5+=(0.03f+0.3f*t)/SR; if(s->f5>=1.0f)s->f5-=1.0f; }
+            s->f5+=(0.03f+0.3f*t)/SR;
+            if(s->f5>=1.0f){ s->f5-=1.0f; float t0=s->lfo3; s->lfo3=s->lfo2; s->lfo2=s->lfo; s->lfo=t0; } }   /* the wrap moves every tone
+                                     * one slot up (octave 0 was slot 0, is now slot 1): its phase moves with it; the silent top one wraps to the silent bottom */
         s->sm1+=(tgt+mo-s->sm1)*0.0015f;                  /* ~15 ms: knob detents and steps glide */
         float C=0.0f, S=0.0f;
-        if(!shep){
-            s->lfo+=exp2f(s->sm1)/SR; if(s->lfo>=1.0f)s->lfo-=1.0f;
-            C=cosf(s->lfo*TWO_PI); S=sinf(s->lfo*TWO_PI);
-        } else {
+        s->f6+=((shep?1.0f:0.0f)-s->f6)*0.0023f; if(s->f6<1e-4f)s->f6=0.0f; else if(s->f6>0.9999f)s->f6=1.0f;
+        float g=s->f6;
+        if(g<1.0f){
+            s->f1+=exp2f(s->sm1)/SR; if(s->f1>=1.0f)s->f1-=1.0f;
+            C=(1.0f-g)*cosf(s->f1*TWO_PI); S=(1.0f-g)*sinf(s->f1*TWO_PI);
+        }
+        if(g>0.0f){ float Cs=0.0f, Ss=0.0f;
             float *ph[3]={&s->lfo,&s->lfo2,&s->lfo3};
             for(int c=0;c<3;c++){ float o=(float)(c-1)+s->f5;                 /* -1 .. +2 octaves */
                 float w=0.5f-0.5f*cosf(TWO_PI*(o+1.0f)/3.0f);                  /* faded in/out over the span */
                 *ph[c]+=exp2f(s->sm1+o)/SR; if(*ph[c]>=1.0f)*ph[c]-=floorf(*ph[c]);
-                C+=w*cosf(*ph[c]*TWO_PI); S+=w*sinf(*ph[c]*TWO_PI); }
-            C*=0.6667f; S*=0.6667f;                        /* the three weights always sum to 1.5 */
+                Cs+=w*cosf(*ph[c]*TWO_PI); Ss+=w*sinf(*ph[c]*TWO_PI); }
+            C+=g*0.9428f*Cs; S+=g*0.9428f*Ss;              /* 1/sqrt(1.125): same RMS as one carrier (peaks < 1.42) */
         }
         float sh=(5.3219f-s->sm1)/(5.3219f-1.585f);      /* log2 40 Hz .. log2 3 Hz */
         sh=clampf(sh,0.0f,1.0f); sh=sh*sh*(3.0f-2.0f*sh)*(1.0f-dirt);
@@ -1364,7 +1371,8 @@ static void fx_ring(slot_dsp_t *s, float *l, float *r, int n,
             float sq=sb_tanh(Cc*6.0f);
             float car=Cc+(sq-Cc)*dirt;
             float wv=xg*car*(1.4142f-0.4142f*dirt);         /* sine ring is -3 dB: make it up */
-            if(sh>0.001f){
+            if(sh<=0.001f){ if(s->i3){ memset(&s->hil[ch*34],0,34*sizeof(float)); if(ch) s->i3=0; } }   /* left the shift zone: restart clean next time */
+            else { if(ch) s->i3=1;
                 float *H=&s->hil[ch*34]; float iv=0.0f, qv=0.0f;
                 for(int q=0;q<17;q++){ float coef=-lut_ap_poles[q]; float *dst=(q&1)?&qv:&iv;
                     float src=(q<=1)?xg:*dst; *dst=warps_ap(&H[q*2],src,coef); }

@@ -21,6 +21,8 @@
 ### Fixes
 - **Pressure on the PalFX punch pad works.** It never reached the effect: the pad was always played at
   its knob settings, whatever the pressure. It now pushes Amount (Macro on Ring), as documented.
+- **Loading a session replaces the whole FX-sequencer pattern.** Steps that were empty in the loaded
+  session used to keep whatever the previous session had on them.
 
 ### Pressure shows on the knob it moves
 - **While you hold a punch pad, the knob its pressure drives shows how far pressure can take it:** an inner

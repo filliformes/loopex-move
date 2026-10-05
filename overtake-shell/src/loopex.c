@@ -3791,6 +3791,8 @@ static void set_param(void *inst, const char *key, const char *val) {
      * Bounded string work only — no I/O, no alloc — so it is callback-safe. */
     if(strcmp(key,"state")==0){
         const char *p=val; char k[64],v[192];
+        if(strstr(val,"pfx15=")){ for(int i=0;i<FXSEQ_STEPS;i++) memset(&s->fx.st[i],0,sizeof s->fx.st[i]); }   /* a full state (it always has pfx15)
+                                                                     * replaces the whole pattern: empty steps are not written */
         while(*p){
             const char *eol=strchr(p,'\n'); if(!eol)eol=p+strlen(p);
             while(p<eol&&(*p==' '||*p=='\t'||*p=='\r'))p++;            /* skip leading space */
@@ -3974,8 +3976,8 @@ static void set_param(void *inst, const char *key, const char *val) {
     SETFR("armThresh",armThresh,0.0,1.0)
     if(strcmp(key,"tapeHold")==0){ int h=atoi(val); s->tapeHold=(h<0)?-1:(h>0)?1:0; return; }
     SETFR("tapeLoCut",tapeLoCut,0.0,1.0) SETFR("tapeWow",tapeWow,0.0,1.0) SETFR("tapeFlut",tapeFlut,0.0,1.0) SETFR("tapeGen",tapeGen,0.0,1.0)
-    if(strcmp(key,"sendAType")==0){int id=-1; for(int i=0;i<PFX_NUM;i++) if(strcmp(val,pfx_name(i))==0){id=i;break;} if(id<0)id=(int)lb_clampf((float)atof(val),0.0f,(float)(PFX_NUM-1)); s->sendAType=id; atomic_store(&s->fxSel[0],id); return;}   /* worker swaps it (may alloc) */
-    if(strcmp(key,"sendBType")==0){int id=-1; for(int i=0;i<PFX_NUM;i++) if(strcmp(val,pfx_name(i))==0){id=i;break;} if(id<0)id=(int)lb_clampf((float)atof(val),0.0f,(float)(PFX_NUM-1)); s->sendBType=id; atomic_store(&s->fxSel[1],id); return;}
+    if(strcmp(key,"sendAType")==0){int id=-1; for(int i=0;i<PFX_NUM;i++) if(strcmp(val,pfx_name(i))==0){id=i;break;} if(id<0)id=pfxOrdId[(int)lb_clampf((float)atof(val),0.0f,(float)(PFX_NUM-1))]; s->sendAType=id; atomic_store(&s->fxSel[0],id); return;}   /* worker swaps it (may alloc) */
+    if(strcmp(key,"sendBType")==0){int id=-1; for(int i=0;i<PFX_NUM;i++) if(strcmp(val,pfx_name(i))==0){id=i;break;} if(id<0)id=pfxOrdId[(int)lb_clampf((float)atof(val),0.0f,(float)(PFX_NUM-1))]; s->sendBType=id; atomic_store(&s->fxSel[1],id); return;}
     SETFR("sendAM1",sendAM1,0.0,1.0) SETFR("sendAM2",sendAM2,0.0,1.0) SETFR("sendADrift",sendADrift,0.0,1.0)
     SETFR("sendBM1",sendBM1,0.0,1.0) SETFR("sendBM2",sendBM2,0.0,1.0) SETFR("sendBDrift",sendBDrift,0.0,1.0)
     SETFR("stMix",stMix,0.0,1.0) SETFR("stStep",stStep,0.0,1.0) SETFR("stOdds",stOdds,0.0,1.0)

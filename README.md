@@ -128,6 +128,8 @@ Hold a pad to apply; **knobs 5–8 edit the held effect's four parameters** live
 **pad pressure** drives a per-effect expression (subdivide, density, glide, freeze, rate…)
 shown in the footer. **Shift + pad latches** it on hands-free; **Shift while holding** latches
 it exactly as it is, pressure included. **Undo + pad** resets a pad to its defaults.
+While a pad is held, **the knob its pressure drives shows how far pressure can take it**: an inner
+arc marks the range and a notch rides the live value (after Charles Vestal's MonkSynth).
 
 ### FX sequencer (✕ button)
 One shared 16-step pattern of punch pads, modelled on the Polyend MESS. **Tap ✕** to run or
@@ -531,6 +533,8 @@ license (see `overtake-shell/vendor/` and the file headers); the rest is inspira
   equaliser) in the 1.960.221 input unit. Bass and Treble corners and slopes are a least-squares
   fit to the response curves printed in the service manual (§1.7.2 / D 3/3), digitised off the
   plot; Mid follows the published Q = 1, 150 Hz–7 kHz, ±11 dB presence spec.
+- **Charles Vestal's MonkSynth** — the pressure marker: the knob a held pad's pressure drives shows
+  its reachable range and a notch riding the live value. https://github.com/charlesvestal/schwung-monksynth
 - **Fairfield Circuitry Randy's Revenge** — the Ring effect's analog side: a sine or square carrier,
   a low-pass on the wet signal and a gritty input; slow square = chop. https://fairfieldcircuitry.com/products/randys-revenge
 - **Red Panda Radius** — the Ring effect's digital side: a clean multiplier that slides into frequency

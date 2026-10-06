@@ -2,6 +2,9 @@
 
 ## v0.9.6 — unreleased
 
+A new Palette effect, **Ring**; pad pressure drawn on the knob it moves; the Palette list in a
+pedalboard order; and PalFX pad pressure finally reaching the effect.
+
 ### New Palette effect: Ring (sends and the PalFX punch pad)
 - **A ring modulator after two pedals:** the Fairfield Circuitry **Randy's Revenge** (an analog multiplier
   on a sine or square carrier, a low-pass on the wet signal, a gritty input) and the Red Panda **Radius**
@@ -17,12 +20,6 @@
 - **Stereo:** the right channel's carrier runs 90° ahead, so slow rates alternate left and right.
 - **On the PalFX punch pad, pressure sweeps Macro** (the carrier) from where the knob is up to the top,
   instead of pushing Amount: press into a slow chop and it accelerates into bells. The footer says `speed`.
-
-### Fixes
-- **Pressure on the PalFX punch pad works.** It never reached the effect: the pad was always played at
-  its knob settings, whatever the pressure. It now pushes Amount (Macro on Ring), as documented.
-- **Loading a session replaces the whole FX-sequencer pattern.** Steps that were empty in the loaded
-  session used to keep whatever the previous session had on them.
 
 ### Pressure shows on the knob it moves
 - **While you hold a punch pad, the knob its pressure drives shows how far pressure can take it:** an inner
@@ -50,6 +47,12 @@
 - **Nothing you saved changes sound.** Sends are stored by name. The PalFX pad's effect knob (and its
   FX-sequencer locks) is converted on load from 0.9.5 and earlier, so every pad keeps its effect. Veil is
   still last, and still the PalFX default.
+
+### Fixes
+- **Pressure on the PalFX punch pad works.** It never reached the effect: the pad was always played at
+  its knob settings, whatever the pressure. It now pushes Amount (Macro on Ring), as documented.
+- **Loading a session replaces the whole FX-sequencer pattern.** Steps that were empty in the loaded
+  session used to keep whatever the previous session had on them.
 
 ## v0.9.5 — 2026-09-23
 

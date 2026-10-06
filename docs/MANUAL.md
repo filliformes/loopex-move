@@ -1,6 +1,6 @@
 # Loopex Manual
 
-*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.5*
+*16-track stereo tape looper for Ableton Move (Schwung Overtake module) — v0.9.6*
 
 This is the full reference. The [README](../README.md) is the short tour.
 

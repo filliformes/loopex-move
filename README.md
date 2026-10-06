@@ -13,7 +13,7 @@ and a MIDI-keyboard polyphony layer.
 > from the norns looper world (*wrms*, *cranes*, *oooooo*, *samsara*, *nydl*, *otis*).
 
 - **Module:** `loopex` · **Name:** Loopex · **Type:** Overtake (Schwung) · **API v2**
-- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.5 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
+- **Format:** 44100 Hz, 128-frame blocks, stereo · **Version:** 0.9.6 · **Manual:** [online](https://filliformes.github.io/loopex-move/) · [markdown](docs/MANUAL.md) · **License:** GPL-3.0
 
 ---
 

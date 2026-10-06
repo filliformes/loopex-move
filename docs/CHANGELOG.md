@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.6 — unreleased
+## v0.9.6 — 2026-10-06
 
 A new Palette effect, **Ring**; pad pressure drawn on the knob it moves; the Palette list in a
 pedalboard order; and PalFX pad pressure finally reaching the effect.
